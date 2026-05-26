@@ -98,3 +98,20 @@ OPTICAL_PARAMS = {
         "optical_threshold": 0.0,
     },
 }
+
+RISK_PARAMS = {
+    "sept": {
+        "elevation_percentile": 25,
+        "slope_threshold": 2,
+        "river_distance_threshold": 1000,
+        "historical_water_threshold": 10,
+        "roi_buffer_m": 3000,
+    },
+    "oct": {
+        "elevation_percentile": 25,
+        "slope_threshold": 2,
+        "river_distance_threshold": 1000,
+        "historical_water_threshold": 10,
+        "roi_buffer_m": 3000,
+    },
+}
