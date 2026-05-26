@@ -1,0 +1,100 @@
+import ee
+
+
+def get_project_config():
+    aoi_emilia_romagna = ee.Geometry.Rectangle([10.7, 43.7, 12.8, 45.1])
+    aoi_romagna = ee.Geometry.Rectangle([11.3, 44.0, 12.5, 44.8])
+    aoi_bologna = ee.Geometry.Rectangle([11.15, 44.15, 11.65, 44.65])
+
+    places = ee.FeatureCollection([
+        ee.Feature(ee.Geometry.Point([11.8833, 44.2856]), {"name": "Faenza"}),
+        ee.Feature(ee.Geometry.Point([11.8000, 44.3190]), {"name": "Castel Bolognese"}),
+        ee.Feature(ee.Geometry.Point([11.9100, 44.4214]), {"name": "Lugo"}),
+        ee.Feature(ee.Geometry.Point([11.9781, 44.4142]), {"name": "Bagnacavallo"}),
+        ee.Feature(ee.Geometry.Point([12.2035, 44.4184]), {"name": "Ravenna"}),
+        ee.Feature(ee.Geometry.Point([11.3426, 44.4949]), {"name": "Bologna"}),
+        ee.Feature(ee.Geometry.Point([11.3436, 44.3896]), {"name": "Pianoro"}),
+    ])
+
+    dates = {
+        "sept_pre": ("2024-08-20", "2024-09-15"),
+        "sept_post": ("2024-09-18", "2024-09-25"),
+        "sept_recovery": ("2024-09-26", "2024-10-15"),
+        "oct_pre": ("2024-10-01", "2024-10-18"),
+        "oct_post": ("2024-10-20", "2024-10-27"),
+        "oct_recovery": ("2024-10-28", "2024-11-15"),
+        "seasonal_ref": ("2023-08-20", "2023-09-30"),
+    }
+
+    events = {
+        "sept": {
+            "name": "September Romagna",
+            "aoi": aoi_romagna,
+            "pre": "sept_pre",
+            "post": "sept_post",
+            "recovery": "sept_recovery",
+            "center": [44.35, 11.9],
+            "zoom": 9,
+            "aoi_color": "red",
+            "aoi_label": "AOI Romagna",
+        },
+        "oct": {
+            "name": "October Bologna-Pianoro",
+            "aoi": aoi_bologna,
+            "pre": "oct_pre",
+            "post": "oct_post",
+            "recovery": "oct_recovery",
+            "center": [44.43, 11.35],
+            "zoom": 10,
+            "aoi_color": "blue",
+            "aoi_label": "AOI Bologna/Pianoro",
+        },
+    }
+
+    return {
+        "aoi_emilia_romagna": aoi_emilia_romagna,
+        "aoi_romagna": aoi_romagna,
+        "aoi_bologna": aoi_bologna,
+        "places": places,
+        "dates": dates,
+        "events": events,
+    }
+
+
+SAR_PARAMS = {
+    "sept": {
+        "delta_threshold": -2.5,
+        "ratio_threshold": 0.7,
+        "vv_post_threshold": -17,
+        "slope_threshold": 5,
+        "min_connected_pixels": 10,
+        "orbit_pass_override": "ASCENDING",
+        "relative_orbit_override": 44,
+        "use_otsu_in_confidence": False,
+    },
+    "oct": {
+        "delta_threshold": -2.5,
+        "ratio_threshold": 0.7,
+        "vv_post_threshold": -17,
+        "slope_threshold": 5,
+        "min_connected_pixels": 10,
+        "orbit_pass_override": "ASCENDING",
+        "relative_orbit_override": 117,
+        "use_otsu_in_confidence": False,
+    },
+}
+
+OPTICAL_PARAMS = {
+    "sept": {
+        "max_cloud_pre": 95,
+        "max_cloud_post": 100,
+        "optical_index": "MNDWI",
+        "optical_threshold": 0.0,
+    },
+    "oct": {
+        "max_cloud_pre": 95,
+        "max_cloud_post": 100,
+        "optical_index": "MNDWI",
+        "optical_threshold": 0.0,
+    },
+}
