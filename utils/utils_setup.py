@@ -1,6 +1,7 @@
 import ee
 import geemap
 import pandas as pd
+from pathlib import Path
 
 
 def load_sentinel1(aoi, start_date, end_date, orbit_pass=None, relative_orbit=None):
@@ -361,3 +362,256 @@ def make_auxiliary_map(
     m.addLayerControl()
 
     return m
+
+def load_core_datasets(
+    us,
+    events,
+    dates,
+    aoi_emilia_romagna,
+    aoi_romagna,
+    include_seasonal_reference=True,
+):
+    """
+    Load Sentinel-1, Sentinel-2 and auxiliary datasets for all flood events.
+
+    Returns:
+        dict containing:
+        - s1
+        - s1_orbits
+        - s2
+        - auxiliary
+        - water_occurrence
+        - permanent_water
+        - rivers_image
+        - vis
+        - s1_seasonal_ref
+        - s2_seasonal_ref_romagna
+    """
+
+    s1 = {}
+    s1_orbits = {}
+    s2 = {}
+
+    for event_key, event in events.items():
+        aoi = event["aoi"]
+
+        s1[event_key] = {
+            "pre": us.load_sentinel1(aoi, *dates[event["pre"]]),
+            "post": us.load_sentinel1(aoi, *dates[event["post"]]),
+            "recovery": us.load_sentinel1(aoi, *dates[event["recovery"]]),
+        }
+
+        s1_orbits[event_key] = {
+            "pre_ASC": us.load_sentinel1(
+                aoi,
+                *dates[event["pre"]],
+                orbit_pass="ASCENDING",
+            ),
+            "post_ASC": us.load_sentinel1(
+                aoi,
+                *dates[event["post"]],
+                orbit_pass="ASCENDING",
+            ),
+            "pre_DESC": us.load_sentinel1(
+                aoi,
+                *dates[event["pre"]],
+                orbit_pass="DESCENDING",
+            ),
+            "post_DESC": us.load_sentinel1(
+                aoi,
+                *dates[event["post"]],
+                orbit_pass="DESCENDING",
+            ),
+        }
+
+        s2[event_key] = {
+            "pre": us.load_sentinel2_raw(
+                aoi,
+                *dates[event["pre"]],
+                max_cloud=95,
+            ),
+            "post": us.load_sentinel2_raw(
+                aoi,
+                *dates[event["post"]],
+                max_cloud=100,
+            ),
+            "recovery": us.load_sentinel2_raw(
+                aoi,
+                *dates[event["recovery"]],
+                max_cloud=95,
+            ),
+        }
+
+    s1_seasonal_ref = None
+    s2_seasonal_ref_romagna = None
+
+    if include_seasonal_reference:
+        s1_seasonal_ref = {
+            "ALL": us.load_sentinel1(
+                aoi_romagna,
+                *dates["seasonal_ref"],
+            ),
+            "ASC": us.load_sentinel1(
+                aoi_romagna,
+                *dates["seasonal_ref"],
+                orbit_pass="ASCENDING",
+            ),
+            "DESC": us.load_sentinel1(
+                aoi_romagna,
+                *dates["seasonal_ref"],
+                orbit_pass="DESCENDING",
+            ),
+        }
+
+        s2_seasonal_ref_romagna = us.load_sentinel2_raw(
+            aoi_romagna,
+            *dates["seasonal_ref"],
+            max_cloud=95,
+        )
+
+    auxiliary = us.load_auxiliary_datasets(aoi_emilia_romagna)
+
+    data = {
+        "s1": s1,
+        "s1_orbits": s1_orbits,
+        "s2": s2,
+        "auxiliary": auxiliary,
+        "water_occurrence": auxiliary["water_occurrence"],
+        "permanent_water": auxiliary["permanent_water"],
+        "rivers_image": auxiliary["rivers_image"],
+        "vis": us.get_vis_params(),
+        "s1_seasonal_ref": s1_seasonal_ref,
+        "s2_seasonal_ref_romagna": s2_seasonal_ref_romagna,
+    }
+
+    return data
+
+
+def build_preview_layers_and_availability(
+    us,
+    events,
+    s1,
+    s1_orbits,
+    s2,
+    include_seasonal_reference=True,
+    s1_seasonal_ref=None,
+    s2_seasonal_ref_romagna=None,
+    aoi_romagna=None,
+    output_path="outputs/tables/00_dataset_availability.csv",
+):
+    """
+    Build Sentinel-1/Sentinel-2 preview composites and dataset availability table.
+
+    Returns:
+        dict containing:
+        - s1_vv
+        - s2_rgb
+        - seasonal_layers
+        - df_availability
+    """
+
+    # Sentinel-1 VV median composites
+    s1_vv = {
+        event_key: {
+            "pre": s1[event_key]["pre"]
+            .select("VV")
+            .median()
+            .clip(events[event_key]["aoi"]),
+            "post": s1[event_key]["post"]
+            .select("VV")
+            .median()
+            .clip(events[event_key]["aoi"]),
+        }
+        for event_key in events
+    }
+
+    # Sentinel-2 RGB median composites
+    s2_rgb = {
+        event_key: {
+            "pre": s2[event_key]["pre"]
+            .median()
+            .clip(events[event_key]["aoi"]),
+            "post": s2[event_key]["post"]
+            .median()
+            .clip(events[event_key]["aoi"]),
+        }
+        for event_key in events
+    }
+
+    seasonal_layers = None
+
+    if include_seasonal_reference:
+        if s1_seasonal_ref is None or s2_seasonal_ref_romagna is None:
+            raise ValueError(
+                "Seasonal reference is enabled, but seasonal collections were not provided."
+            )
+
+        if aoi_romagna is None:
+            raise ValueError(
+                "aoi_romagna must be provided when seasonal reference is enabled."
+            )
+
+        s1_seasonal_ref_vv = (
+            s1_seasonal_ref["ALL"]
+            .select("VV")
+            .median()
+            .clip(aoi_romagna)
+        )
+
+        s2_seasonal_ref_rgb = (
+            s2_seasonal_ref_romagna
+            .median()
+            .clip(aoi_romagna)
+        )
+
+        s1_pre_minus_seasonal = (
+            s1_vv["sept"]["pre"]
+            .subtract(s1_seasonal_ref_vv)
+            .rename("S1_2024_pre_minus_2023_seasonal")
+        )
+
+        seasonal_layers = {
+            "s1_vv": s1_seasonal_ref_vv,
+            "s1_difference": s1_pre_minus_seasonal,
+            "s2_rgb": s2_seasonal_ref_rgb,
+        }
+
+    collections = {}
+
+    for event_key, event in events.items():
+        label = event["name"]
+
+        collections.update({
+            f"S1 {label} pre-event ALL": s1[event_key]["pre"],
+            f"S1 {label} post-event ALL": s1[event_key]["post"],
+            f"S1 {label} recovery ALL": s1[event_key]["recovery"],
+            f"S1 {label} pre-event ASC": s1_orbits[event_key]["pre_ASC"],
+            f"S1 {label} post-event ASC": s1_orbits[event_key]["post_ASC"],
+            f"S1 {label} pre-event DESC": s1_orbits[event_key]["pre_DESC"],
+            f"S1 {label} post-event DESC": s1_orbits[event_key]["post_DESC"],
+            f"S2 {label} pre-event raw": s2[event_key]["pre"],
+            f"S2 {label} post-event raw": s2[event_key]["post"],
+            f"S2 {label} recovery raw": s2[event_key]["recovery"],
+        })
+
+    if include_seasonal_reference:
+        collections.update({
+            "S1 Romagna seasonal reference ALL": s1_seasonal_ref["ALL"],
+            "S1 Romagna seasonal reference ASC": s1_seasonal_ref["ASC"],
+            "S1 Romagna seasonal reference DESC": s1_seasonal_ref["DESC"],
+            "S2 Romagna seasonal reference raw": s2_seasonal_ref_romagna,
+        })
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    df_availability = us.collection_sizes(
+        collections,
+        output_path=output_path,
+    )
+
+    return {
+        "s1_vv": s1_vv,
+        "s2_rgb": s2_rgb,
+        "seasonal_layers": seasonal_layers,
+        "df_availability": df_availability,
+    }
