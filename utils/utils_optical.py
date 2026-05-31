@@ -348,6 +348,184 @@ def _make_optical_map(
     return m
 
 
+def mask_s2_clouds_scl(image):
+    """
+    Mask clouds, shadows, cirrus, snow and invalid pixels using Sentinel-2 SCL.
+
+    Keeps:
+    4 = vegetation
+    5 = bare soil
+    6 = water
+    7 = unclassified / clear enough
+    """
+    image = ee.Image(image)
+
+    scl = image.select("SCL")
+
+    clear = (
+        scl.eq(4)       # vegetation
+        .Or(scl.eq(5))  # bare soil
+        .Or(scl.eq(6))  # water
+        .Or(scl.eq(7))  # unclassified
+    )
+
+    return image.updateMask(clear)
+
+
+def add_optical_indices(image):
+    """
+    Add NDWI, MNDWI and NDVI to a Sentinel-2 image.
+    Assumes reflectance bands are already scaled to 0-1.
+    """
+    image = ee.Image(image)
+
+    ndwi = image.normalizedDifference(["B3", "B8"]).rename("NDWI")
+    mndwi = image.normalizedDifference(["B3", "B11"]).rename("MNDWI")
+    ndvi = image.normalizedDifference(["B8", "B4"]).rename("NDVI")
+
+    return image.addBands([ndwi, mndwi, ndvi])
+
+
+def preprocess_s2_collection(collection, apply_cloud_mask=True):
+    """
+    Scale Sentinel-2 SR reflectance bands and optionally apply SCL cloud masking.
+
+    Important:
+    - Optical reflectance bands are divided by 10000.
+    - SCL is kept unscaled because it contains integer classification labels.
+    """
+
+    optical_bands = [
+        "B1", "B2", "B3", "B4", "B5", "B6",
+        "B7", "B8", "B8A", "B9", "B11", "B12"
+    ]
+
+    def preprocess(image):
+        image = ee.Image(image)
+
+        scaled_optical = image.select(optical_bands).divide(10000)
+        scl = image.select("SCL")
+
+        out = (
+            scaled_optical
+            .addBands(scl)
+            .copyProperties(image, image.propertyNames())
+        )
+
+        if apply_cloud_mask:
+            out = mask_s2_clouds_scl(out)
+
+        out = add_optical_indices(out)
+
+        return out
+
+    return collection.map(preprocess)
+
+
+def make_best_available_s2_composite(
+    collection,
+    method="median",
+):
+    """
+    Build a cloud-masked Sentinel-2 composite from the available valid pixels.
+
+    method:
+    - "median": robust standard multi-temporal composite
+    - "mosaic": uses the collection order after sorting by cloud percentage
+    """
+    method = method.lower()
+
+    if method == "median":
+        return collection.median()
+
+    if method == "mosaic":
+        return collection.sort("CLOUDY_PIXEL_PERCENTAGE").mosaic()
+
+    raise ValueError("method must be either 'median' or 'mosaic'.")
+
+
+def load_s2_best_available_composite(
+    aoi,
+    dates,
+    event,
+    window_key,
+    max_cloud=100,
+    apply_cloud_mask=True,
+    composite_method="median",
+):
+    """
+    Load Sentinel-2 SR Harmonized images for a selected date window and create
+    a best-available optical composite.
+    """
+    start, end = dates[window_key]
+
+    collection_raw = (
+        ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+        .filterBounds(aoi)
+        .filterDate(start, end)
+        .filter(ee.Filter.lte("CLOUDY_PIXEL_PERCENTAGE", max_cloud))
+    )
+
+    collection_proc = preprocess_s2_collection(
+        collection_raw,
+        apply_cloud_mask=apply_cloud_mask,
+    )
+
+    composite = make_best_available_s2_composite(
+        collection_proc,
+        method=composite_method,
+    ).clip(aoi)
+
+    return {
+        "collection_raw": collection_raw,
+        "collection_proc": collection_proc,
+        "composite": composite,
+        "start": start,
+        "end": end,
+        "count": collection_raw.size(),
+        "window_key": window_key,
+        "max_cloud": max_cloud,
+        "apply_cloud_mask": apply_cloud_mask,
+        "composite_method": composite_method,
+    }
+
+
+def valid_pixel_percentage(image, region, band="B3", scale=20):
+    """
+    Estimate percentage of valid pixels in a composite over a region.
+    Uses the mask of the selected band.
+    """
+    valid_area = (
+        image.select(band)
+        .mask()
+        .gt(0)
+        .multiply(ee.Image.pixelArea())
+        .rename("valid_area")
+    )
+
+    total_area = ee.Image.pixelArea().rename("total_area")
+
+    valid = valid_area.reduceRegion(
+        reducer=ee.Reducer.sum(),
+        geometry=region,
+        scale=scale,
+        maxPixels=1e13,
+        bestEffort=True,
+        tileScale=4,
+    ).get("valid_area")
+
+    total = total_area.reduceRegion(
+        reducer=ee.Reducer.sum(),
+        geometry=region,
+        scale=scale,
+        maxPixels=1e13,
+        bestEffort=True,
+        tileScale=4,
+    ).get("total_area")
+
+    return ee.Number(valid).divide(ee.Number(total)).multiply(100)
+
+
 # ============================================================
 # PUBLIC OPTICAL PIPELINE
 # ============================================================
@@ -364,6 +542,9 @@ def run_optical_event(
     max_cloud_post=100,
     optical_index="MNDWI",
     optical_threshold=0.0,
+    pre_window_override=None,
+    post_window_override=None,
+    composite_method="median",
     make_map=True,
     vis=None,
 ):
@@ -371,23 +552,45 @@ def run_optical_event(
         vis = get_optical_vis_params()
 
     aoi = event["aoi"]
-    pre_dates = dates[event["pre"]]
-    post_dates = dates[event["post"]]
+
+    pre_window_key = pre_window_override or event["pre"]
+    post_window_key = post_window_override or event["post"]
+
+    pre_dates = dates[pre_window_key]
+    post_dates = dates[post_window_key]
+
+    # Best-available cloud-masked Sentinel-2 composites.
+    pre_data = load_s2_best_available_composite(
+        aoi=aoi,
+        dates=dates,
+        event=event,
+        window_key=pre_window_key,
+        max_cloud=max_cloud_pre,
+        apply_cloud_mask=True,
+        composite_method=composite_method,
+    )
+
+    post_data = load_s2_best_available_composite(
+        aoi=aoi,
+        dates=dates,
+        event=event,
+        window_key=post_window_key,
+        max_cloud=max_cloud_post,
+        apply_cloud_mask=True,
+        composite_method=composite_method,
+    )
+
+    pre_comp = pre_data["composite"]
+    post_comp = post_data["composite"]
+
+    # Keep collections for metadata and optional inspection.
+    s2_pre_raw = pre_data["collection_raw"]
+    s2_post_raw = post_data["collection_raw"]
+    s2_pre = pre_data["collection_proc"]
+    s2_post = post_data["collection_proc"]
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    s2_pre_raw = us.load_sentinel2_raw(
-        aoi,
-        *pre_dates,
-        max_cloud=max_cloud_pre,
-    )
-
-    s2_post_raw = us.load_sentinel2_raw(
-        aoi,
-        *post_dates,
-        max_cloud=max_cloud_post,
-    )
 
     df_s2_metadata = pd.concat(
         [
@@ -400,12 +603,6 @@ def run_optical_event(
     if not df_s2_metadata.empty:
         df_s2_metadata = df_s2_metadata.sort_values(["label", "date"]).reset_index(drop=True)
 
-    s2_pre = _preprocess_s2_collection(s2_pre_raw)
-    s2_post = _preprocess_s2_collection(s2_post_raw)
-
-    pre_comp = s2_pre.median().clip(aoi)
-    post_comp = s2_post.median().clip(aoi)
-
     pre_valid = pre_comp.select("B3").mask().rename(f"{event_key}_pre_valid").toByte()
     post_valid = post_comp.select("B3").mask().rename(f"{event_key}_post_valid").toByte()
 
@@ -416,11 +613,17 @@ def run_optical_event(
         {
             "event": event_key,
             "window": "pre",
+            "window_key": pre_window_key,
+            "start": pre_dates[0],
+            "end": pre_dates[1],
             "valid_pixel_percentage_aoi": pre_valid_percentage,
         },
         {
             "event": event_key,
             "window": "post",
+            "window_key": post_window_key,
+            "start": post_dates[0],
+            "end": post_dates[1],
             "valid_pixel_percentage_aoi": post_valid_percentage,
         },
     ])
@@ -468,6 +671,9 @@ def run_optical_event(
     metrics["event"] = event_key
     metrics["optical_index"] = optical_index
     metrics["optical_threshold"] = optical_threshold
+    metrics["pre_window_key"] = pre_window_key
+    metrics["post_window_key"] = post_window_key
+    metrics["composite_method"] = composite_method
 
     df_agreement = pd.DataFrame([metrics])
 
@@ -514,4 +720,11 @@ def run_optical_event(
         "fusion_map": fusion_map,
         "metrics": metrics,
         "map": optical_map,
+        "pre_window_key": pre_window_key,
+        "post_window_key": post_window_key,
+        "pre_window": (pre_data["start"], pre_data["end"]),
+        "post_window": (post_data["start"], post_data["end"]),
+        "pre_image_count": pre_data["count"],
+        "post_image_count": post_data["count"],
+        "composite_method": composite_method,
     }

@@ -333,16 +333,21 @@ def roi_statistics(
     hazard,
     risk_class,
     worldcover,
-    places,
-    aoi,
+    roi_zones,
     event_key,
-    buffer_m=3000,
     scale=20,
 ):
-    event_places = places.filterBounds(aoi)
+    """
+    Compute flood/risk/exposure statistics over predefined ROI polygons.
+
+    This is preferable to city-point buffers because flood impacts usually occur
+    over floodplain areas, agricultural zones, river corridors, or municipal
+    surroundings, not necessarily at the exact city-centre point.
+    """
 
     hazard_mask = hazard.gte(2).unmask(0)
     high_risk_mask = risk_class.eq(3).unmask(0)
+
     builtup = worldcover.eq(50).unmask(0)
     cropland = worldcover.eq(40).unmask(0)
 
@@ -355,20 +360,13 @@ def roi_statistics(
         hazard_mask.And(cropland).multiply(pixel_area_km2).rename("cropland_flooded_km2"),
     ])
 
-    def buffer_feature(feat):
-        feat = ee.Feature(feat)
-        return ee.Feature(
-            feat.geometry().buffer(buffer_m),
-            feat.toDictionary()
-        ).set({
-            "event": event_key,
-            "buffer_m": buffer_m,
-        })
+    def add_event_property(feat):
+        return ee.Feature(feat).set("event", event_key)
 
-    buffered_places = event_places.map(buffer_feature)
+    roi_zones = roi_zones.map(add_event_property)
 
     stats_fc = area_image.reduceRegions(
-        collection=buffered_places,
+        collection=roi_zones,
         reducer=ee.Reducer.sum(),
         scale=scale,
         tileScale=4,
@@ -376,19 +374,32 @@ def roi_statistics(
 
     df = _ee_fc_to_df(stats_fc)
 
-    if not df.empty:
-        keep_cols = [
-            "event",
-            "name",
-            "buffer_m",
-            "flood_area_km2",
-            "high_risk_area_km2",
-            "builtup_flooded_km2",
-            "cropland_flooded_km2",
-        ]
-        df = df[[col for col in keep_cols if col in df.columns]]
+    if df.empty:
+        return df
 
-    return df
+    keep_cols = [
+        "event",
+        "name",
+        "flood_area_km2",
+        "high_risk_area_km2",
+        "builtup_flooded_km2",
+        "cropland_flooded_km2",
+    ]
+
+    df = df[[col for col in keep_cols if col in df.columns]]
+
+    numeric_cols = [
+        "flood_area_km2",
+        "high_risk_area_km2",
+        "builtup_flooded_km2",
+        "cropland_flooded_km2",
+    ]
+
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = df[col].fillna(0.0)
+
+    return df.sort_values("flood_area_km2", ascending=False).reset_index(drop=True)
 
 
 def make_final_risk_map(
@@ -504,16 +515,19 @@ def run_final_risk_event(
         scale=10,
     )
 
-    df_roi = roi_statistics(
-        hazard=hazard,
-        risk_class=risk["risk_class"],
-        worldcover=worldcover,
-        places=places,
-        aoi=aoi,
-        event_key=event_key,
-        buffer_m=roi_buffer_m,
-        scale=20,
-    )
+    roi_zones = event.get("roi_zones", None)
+
+    if roi_zones is not None:
+        df_roi = roi_statistics(
+            hazard=hazard,
+            risk_class=risk["risk_class"],
+            worldcover=worldcover,
+            roi_zones=roi_zones,
+            event_key=event_key,
+            scale=20,
+        )
+    else:
+        df_roi = pd.DataFrame()
 
     df_exposure.to_csv(output_dir / f"{event_key}_final_exposure_by_worldcover.csv", index=False)
     df_vulnerability_area.to_csv(output_dir / f"{event_key}_final_vulnerability_area.csv", index=False)

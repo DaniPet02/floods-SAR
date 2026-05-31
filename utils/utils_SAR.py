@@ -360,6 +360,283 @@ def _make_sar_map(
     return m
 
 
+def make_plain_s1_pre_post(
+    aoi,
+    dates,
+    event,
+    load_sentinel1_fn,
+    orbit_pass=None,
+    relative_orbit=None,
+    band="VV",
+):
+    """
+    Load Sentinel-1 pre/post collections and create plain median composites
+    for dataset visualization.
+
+    No flood-specific processing is applied here.
+    """
+
+    s1_pre = load_sentinel1_fn(
+        aoi,
+        *dates[event["pre"]],
+        orbit_pass=orbit_pass,
+        relative_orbit=relative_orbit,
+    )
+
+    s1_post = load_sentinel1_fn(
+        aoi,
+        *dates[event["post"]],
+        orbit_pass=orbit_pass,
+        relative_orbit=relative_orbit,
+    )
+
+    pre_img = (
+        s1_pre
+        .select(band)
+        .median()
+        .clip(aoi)
+        .rename(f"pre_{band}_plain")
+    )
+
+    post_img = (
+        s1_post
+        .select(band)
+        .median()
+        .clip(aoi)
+        .rename(f"post_{band}_plain")
+    )
+
+    return {
+        "s1_pre": s1_pre,
+        "s1_post": s1_post,
+        "pre_img": pre_img,
+        "post_img": post_img,
+        "pre_count": s1_pre.size(),
+        "post_count": s1_post.size(),
+        "band": band,
+        "orbit_pass": orbit_pass,
+        "relative_orbit": relative_orbit,
+    }
+
+
+def mask_coverage_percent(image, region, band="VV", scale=100):
+    valid_area = (
+        image.select(band)
+        .mask()
+        .gt(0)
+        .multiply(ee.Image.pixelArea())
+        .rename("valid_area")
+    )
+
+    total_area = ee.Image.pixelArea().rename("total_area")
+
+    valid = valid_area.reduceRegion(
+        reducer=ee.Reducer.sum(),
+        geometry=region,
+        scale=scale,
+        maxPixels=1e13,
+        bestEffort=True,
+        tileScale=4,
+    ).get("valid_area")
+
+    total = total_area.reduceRegion(
+        reducer=ee.Reducer.sum(),
+        geometry=region,
+        scale=scale,
+        maxPixels=1e13,
+        bestEffort=True,
+        tileScale=4,
+    ).get("total_area")
+
+    return ee.Number(valid).divide(ee.Number(total)).multiply(100)
+
+
+def audit_s1_candidate_coverage(
+    load_sentinel1_fn,
+    event,
+    dates,
+    candidates_df,
+    display_aoi,
+    scale=100,
+):
+    rows = []
+
+    for _, row in candidates_df.iterrows():
+        orbit_pass = row["orbit_pass"]
+        relative_orbit = int(row["relative_orbit"])
+
+        pre_dates = dates[event["pre"]]
+        post_dates = dates[event["post"]]
+
+        s1_pre = load_sentinel1_fn(
+            event["aoi"],
+            *pre_dates,
+            orbit_pass=orbit_pass,
+            relative_orbit=relative_orbit,
+        )
+
+        s1_post = load_sentinel1_fn(
+            event["aoi"],
+            *post_dates,
+            orbit_pass=orbit_pass,
+            relative_orbit=relative_orbit,
+        )
+
+        pre_img = s1_pre.select("VV").median()
+        post_img = s1_post.select("VV").median()
+
+        rows.append({
+            "orbit_pass": orbit_pass,
+            "relative_orbit": relative_orbit,
+            "pre_count": s1_pre.size().getInfo(),
+            "post_count": s1_post.size().getInfo(),
+            "pre_coverage_analysis_%": mask_coverage_percent(pre_img, event["aoi"], scale=scale).getInfo(),
+            "post_coverage_analysis_%": mask_coverage_percent(post_img, event["aoi"], scale=scale).getInfo(),
+            "pre_coverage_display_%": mask_coverage_percent(pre_img, display_aoi, scale=scale).getInfo(),
+            "post_coverage_display_%": mask_coverage_percent(post_img, display_aoi, scale=scale).getInfo(),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def build_sar_pre_post_filtered_png_images(
+    pre_vv,
+    post_vv,
+    permanent_water=None,
+    slope=None,
+    flood_delta=None,
+    flood_ratio=None,
+    final_flood_mask=None,
+    sar_confidence=None,
+    slope_threshold=5,
+    apply_permanent_water_mask=False,
+    apply_slope_mask=False,
+    show_flood_delta_overlay=False,
+    show_flood_ratio_overlay=False,
+    show_final_flood_overlay=True,
+    show_confidence_overlay=False,
+    overlay_on_post_only=True,
+    sar_vis=None,
+):
+    """
+    Build pre/post Sentinel-1 VV RGB images for static PNG export.
+
+    The base images are the plain VV backscatter images.
+    Optional masks can hide permanent water or steep areas.
+    Optional overlays can show flood candidates or SAR confidence.
+    """
+
+    if sar_vis is None:
+        sar_vis = {
+            "min": -25,
+            "max": 0,
+        }
+
+    valid_mask = ee.Image(1)
+
+    if apply_permanent_water_mask and permanent_water is not None:
+        valid_mask = valid_mask.And(permanent_water.unmask(0).Not())
+
+    if apply_slope_mask and slope is not None:
+        valid_mask = valid_mask.And(slope.lt(slope_threshold).unmask(0))
+
+    pre_base = pre_vv.updateMask(valid_mask).visualize(**sar_vis)
+    post_base = post_vv.updateMask(valid_mask).visualize(**sar_vis)
+
+    left_img = pre_base
+    right_img = post_base
+
+    def add_overlay(base_img, mask, palette, opacity=0.65, min_value=0, max_value=1):
+        if mask is None:
+            return base_img
+
+        overlay = (
+            mask
+            .selfMask()
+            .visualize(
+                min=min_value,
+                max=max_value,
+                palette=palette,
+                opacity=opacity,
+            )
+        )
+
+        return base_img.blend(overlay)
+
+    # Blue = flood candidates from ΔVV
+    if show_flood_delta_overlay and flood_delta is not None:
+        if overlay_on_post_only:
+            right_img = add_overlay(
+                right_img,
+                flood_delta,
+                palette=["0000ff"],
+                opacity=0.65,
+            )
+        else:
+            left_img = add_overlay(left_img, flood_delta, palette=["0000ff"], opacity=0.65)
+            right_img = add_overlay(right_img, flood_delta, palette=["0000ff"], opacity=0.65)
+
+    # Cyan = flood candidates from ratio
+    if show_flood_ratio_overlay and flood_ratio is not None:
+        if overlay_on_post_only:
+            right_img = add_overlay(
+                right_img,
+                flood_ratio,
+                palette=["00ffff"],
+                opacity=0.55,
+            )
+        else:
+            left_img = add_overlay(left_img, flood_ratio, palette=["00ffff"], opacity=0.55)
+            right_img = add_overlay(right_img, flood_ratio, palette=["00ffff"], opacity=0.55)
+
+    # Blue = final selected flood mask, usually SAR confidence >= 2
+    if show_final_flood_overlay and final_flood_mask is not None:
+        if overlay_on_post_only:
+            right_img = add_overlay(
+                right_img,
+                final_flood_mask,
+                palette=["0000ff"],
+                opacity=0.70,
+            )
+        else:
+            left_img = add_overlay(left_img, final_flood_mask, palette=["0000ff"], opacity=0.70)
+            right_img = add_overlay(right_img, final_flood_mask, palette=["0000ff"], opacity=0.70)
+
+    # Yellow/orange/red = SAR confidence levels
+    if show_confidence_overlay and sar_confidence is not None:
+        if overlay_on_post_only:
+            right_img = add_overlay(
+                right_img,
+                sar_confidence,
+                palette=["ffff00", "ff9900", "ff0000"],
+                opacity=0.70,
+                min_value=1,
+                max_value=3,
+            )
+        else:
+            left_img = add_overlay(
+                left_img,
+                sar_confidence,
+                palette=["ffff00", "ff9900", "ff0000"],
+                opacity=0.70,
+                min_value=1,
+                max_value=3,
+            )
+            right_img = add_overlay(
+                right_img,
+                sar_confidence,
+                palette=["ffff00", "ff9900", "ff0000"],
+                opacity=0.70,
+                min_value=1,
+                max_value=3,
+            )
+
+    return {
+        "left_image": left_img,
+        "right_image": right_img,
+    }
+
+
 # ============================================================
 # PUBLIC SAR PIPELINE
 # ============================================================

@@ -2,6 +2,9 @@ import ee
 import geemap
 import pandas as pd
 from pathlib import Path
+import requests
+from PIL import Image, ImageDraw
+from IPython.display import Image as IPyImage
 
 
 def load_sentinel1(aoi, start_date, end_date, orbit_pass=None, relative_orbit=None):
@@ -368,7 +371,7 @@ def load_core_datasets(
     events,
     dates,
     aoi_emilia_romagna,
-    aoi_romagna,
+    analysis_aoi,
     include_seasonal_reference=True,
 ):
     """
@@ -448,23 +451,23 @@ def load_core_datasets(
     if include_seasonal_reference:
         s1_seasonal_ref = {
             "ALL": us.load_sentinel1(
-                aoi_romagna,
+                analysis_aoi,
                 *dates["seasonal_ref"],
             ),
             "ASC": us.load_sentinel1(
-                aoi_romagna,
+                analysis_aoi,
                 *dates["seasonal_ref"],
                 orbit_pass="ASCENDING",
             ),
             "DESC": us.load_sentinel1(
-                aoi_romagna,
+                analysis_aoi,
                 *dates["seasonal_ref"],
                 orbit_pass="DESCENDING",
             ),
         }
 
         s2_seasonal_ref_romagna = us.load_sentinel2_raw(
-            aoi_romagna,
+            analysis_aoi,
             *dates["seasonal_ref"],
             max_cloud=95,
         )
@@ -496,7 +499,7 @@ def build_preview_layers_and_availability(
     include_seasonal_reference=True,
     s1_seasonal_ref=None,
     s2_seasonal_ref_romagna=None,
-    aoi_romagna=None,
+    analysis_aoi=None,
     output_path="outputs/tables/00_dataset_availability.csv",
 ):
     """
@@ -546,7 +549,7 @@ def build_preview_layers_and_availability(
                 "Seasonal reference is enabled, but seasonal collections were not provided."
             )
 
-        if aoi_romagna is None:
+        if analysis_aoi is None:
             raise ValueError(
                 "aoi_romagna must be provided when seasonal reference is enabled."
             )
@@ -555,13 +558,13 @@ def build_preview_layers_and_availability(
             s1_seasonal_ref["ALL"]
             .select("VV")
             .median()
-            .clip(aoi_romagna)
+            .clip(analysis_aoi)
         )
 
         s2_seasonal_ref_rgb = (
             s2_seasonal_ref_romagna
             .median()
-            .clip(aoi_romagna)
+            .clip(analysis_aoi)
         )
 
         s1_pre_minus_seasonal = (
@@ -615,3 +618,102 @@ def build_preview_layers_and_availability(
         "seasonal_layers": seasonal_layers,
         "df_availability": df_availability,
     }
+
+
+def export_single_ee_image_png(
+    image,
+    region,
+    vis_params,
+    output_path,
+    title=None,
+    dimensions=900,
+):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    url = image.clip(region).getThumbURL({
+        **vis_params,
+        "region": region,
+        "dimensions": dimensions,
+        "format": "png",
+    })
+
+    response = requests.get(url)
+    response.raise_for_status()
+
+    tmp_path = output_path.with_suffix(".tmp.png")
+    tmp_path.write_bytes(response.content)
+
+    img = Image.open(tmp_path).convert("RGB")
+
+    if title is not None:
+        title_h = 44
+        canvas = Image.new("RGB", (img.width, img.height + title_h), "white")
+        canvas.paste(img, (0, title_h))
+
+        draw = ImageDraw.Draw(canvas)
+        draw.text((12, 12), title, fill="black")
+
+        canvas.save(output_path)
+    else:
+        img.save(output_path)
+
+    tmp_path.unlink(missing_ok=True)
+
+    return IPyImage(filename=str(output_path))
+
+
+def export_side_by_side_ee_images(
+    left_image,
+    right_image,
+    region,
+    vis_params,
+    output_path,
+    left_title="Pre-event",
+    right_title="Post-event",
+    dimensions=900,
+):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def download_thumb(image, suffix):
+        url = image.clip(region).getThumbURL({
+            **vis_params,
+            "region": region,
+            "dimensions": dimensions,
+            "format": "png",
+        })
+        response = requests.get(url)
+        response.raise_for_status()
+        tmp_path = output_path.with_name(output_path.stem + f"_{suffix}.png")
+        tmp_path.write_bytes(response.content)
+        return tmp_path
+
+    left_path = download_thumb(left_image, "left_tmp")
+    right_path = download_thumb(right_image, "right_tmp")
+
+    left = Image.open(left_path).convert("RGB")
+    right = Image.open(right_path).convert("RGB")
+
+    target_h = min(left.height, right.height)
+    left = left.resize((int(left.width * target_h / left.height), target_h))
+    right = right.resize((int(right.width * target_h / right.height), target_h))
+
+    title_h = 48
+    gap = 20
+    width = left.width + right.width + gap
+    height = target_h + title_h
+
+    canvas = Image.new("RGB", (width, height), "white")
+    canvas.paste(left, (0, title_h))
+    canvas.paste(right, (left.width + gap, title_h))
+
+    draw = ImageDraw.Draw(canvas)
+    draw.text((12, 14), left_title, fill="black")
+    draw.text((left.width + gap + 12, 14), right_title, fill="black")
+
+    canvas.save(output_path)
+    left_path.unlink(missing_ok=True)
+    right_path.unlink(missing_ok=True)
+
+    return IPyImage(filename=str(output_path))
