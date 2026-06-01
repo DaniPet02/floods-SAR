@@ -19,7 +19,6 @@ def cache_key(stage, month, params=None, version="v1"):
     )
     return f"{stage}_{month}_{hashlib.md5(text.encode()).hexdigest()[:8]}"
 
-
 def cached(stage, month, params, compute_fn, use_cache=True, version="v1"):
     key = cache_key(stage, month, params, version)
 
@@ -31,7 +30,6 @@ def cached(stage, month, params, compute_fn, use_cache=True, version="v1"):
     _CACHE[key] = compute_fn()
     return _CACHE[key]
 
-
 def clear_cache(stage=None):
     if stage is None:
         _CACHE.clear()
@@ -39,6 +37,7 @@ def clear_cache(stage=None):
         for key in list(_CACHE):
             if key.startswith(f"{stage}_"):
                 del _CACHE[key]
+
 
 # =============================================================================
 # Dataset loading
@@ -151,7 +150,6 @@ def load_event_datasets(aoi, dates, event, sar_params=None, optical_params=None)
         "availability": availability,
     }
 
-
 def load_auxiliary_datasets(aoi):
     """
     Load static auxiliary layers used for flood post-processing and interpretation.
@@ -235,9 +233,11 @@ def collection_sizes(collections, output_path=None):
 
     return df
 
+
 # =============================================================================
 # Visualization parameters
 # =============================================================================
+
 def get_vis_params():
     """Centralized visualization parameters for maps and PNG exports."""
     return {
@@ -411,7 +411,6 @@ def styled_aoi(aoi, color="red", width=2):
         width=width,
     )
 
-
 def styled_places(places, aoi, color="000000", point_size=4, point_shape="circle"):
     """Return place points inside an AOI as a styled FeatureCollection."""
     return places.filterBounds(aoi).style(
@@ -447,6 +446,7 @@ def make_context_map(event, aoi, places):
 
     m.addLayerControl()
     return m
+
 
 # =============================================================================
 # Composite helpers
@@ -491,8 +491,6 @@ def mask_area_km2(mask, region, scale=10):
     ).get("area_km2").getInfo()
 
     return 0.0 if value is None else float(value)
-
-
 
 
 # =============================================================================
@@ -549,7 +547,6 @@ def export_side_by_side_ee_images(
 
     return IPyImage(filename=str(output_path))
 
-
 def download_ee_thumbnail(image, region, vis_params, dimensions=900):
     """Download an Earth Engine thumbnail and return it as a PIL RGB image."""
     url = image.clip(region).getThumbURL({
@@ -577,7 +574,6 @@ def match_heights(left, right):
     )
 
     return left, right
-
 
 def export_single_ee_image_png(
     image,

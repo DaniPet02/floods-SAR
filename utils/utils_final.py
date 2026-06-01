@@ -2,7 +2,6 @@ import ee
 import geemap
 import pandas as pd
 from pathlib import Path
-
 from utils import config as cfg
 from utils import utils_setup as us
 
@@ -41,7 +40,6 @@ def make_hazard_layer(sar_confidence, confidence_threshold=3, name="hazard"):
         .rename(name)
         .toByte()
     )
-
 
 def make_vulnerability_layers(
     dem,
@@ -129,7 +127,6 @@ def make_vulnerability_layers(
         "vulnerability_class": vulnerability_class,
     }
 
-
 def make_risk_layers(hazard, vulnerability_class, name="risk"):
     """Combine flood hazard and vulnerability into risk score and risk class."""
     risk_score = (
@@ -190,7 +187,6 @@ def area_by_class(class_image, class_labels, region, event_key, scale=10):
 
     return pd.DataFrame(rows).sort_values("class").reset_index(drop=True)
 
-
 def exposure_by_worldcover(hazard, worldcover, region, event_key, scale=10):
     """Compute medium/high flood hazard area grouped by WorldCover class."""
     hazard_mask = hazard.gte(2)
@@ -229,7 +225,6 @@ def exposure_by_worldcover(hazard, worldcover, region, event_key, scale=10):
         .sort_values("area_km2", ascending=False)
         .reset_index(drop=True)
     )
-
 
 def final_processing_df(event_key, risk_params, final_results):
     """Create a compact vertical summary of the final workflow settings."""
@@ -337,7 +332,6 @@ def make_final_map(event, places, hazard, vulnerability, risk):
     m.addLayerControl()
 
     return m
-
 
 def export_hazard_vs_risk_png(final_results, region, output_dir, month, dimensions=900):
     """Export hazard and final risk class side by side."""

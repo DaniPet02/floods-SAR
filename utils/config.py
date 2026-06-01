@@ -144,7 +144,7 @@ OPTICAL_PARAMS = {
         "optical_threshold": 0.0,
         "pre_window_override": "sept_pre_optical",
         "post_window_override": "sept_post_optical",
-        "composite_method": "mosaic",
+        "composite_method": "median",
     },
     "oct": {
         "max_cloud_pre": 50,
@@ -153,7 +153,7 @@ OPTICAL_PARAMS = {
         "optical_threshold": 0.10,
         "pre_window_override": "oct_pre_optical",
         "post_window_override": "oct_post_optical",
-        "composite_method": "mosaic",
+        "composite_method": "median",
     },
 }
 

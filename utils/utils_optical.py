@@ -2,9 +2,7 @@ import ee
 import geemap
 import pandas as pd
 from pathlib import Path
-
 from utils import utils_setup as us
-from utils import utils_SAR as su
 
 
 # =============================================================================
@@ -40,7 +38,6 @@ def preprocess_s2_collection(collection):
 
     return collection.map(preprocess)
 
-
 def make_s2_composite(collection, method="median"):
     """Build a simple Sentinel-2 composite from a preprocessed collection."""
     method = method.lower()
@@ -55,6 +52,7 @@ def make_s2_composite(collection, method="median"):
         return ee.Image(collection.sort("CLOUDY_PIXEL_PERCENTAGE").first())
 
     raise ValueError("method must be 'median', 'mosaic', or 'least_cloudy'.")
+
 
 # =============================================================================
 # Small summaries
@@ -82,7 +80,6 @@ def s2_metadata_df(collection, label):
     df = pd.DataFrame([feature["properties"] for feature in features])
 
     return df.sort_values(["label", "date"]).reset_index(drop=True)
-
 
 def valid_pixel_percentage(image, region, band="B3", scale=20):
     """Estimate valid-pixel percentage over an AOI using the mask of one band."""
@@ -118,7 +115,6 @@ def valid_pixel_percentage(image, region, band="B3", scale=20):
         return 0.0
 
     return float(valid / total * 100)
-
 
 def optical_processing_df(event_key, s2, optical, optical_params):
     """Compact vertical summary of the Sentinel-2 optical configuration."""
@@ -172,7 +168,6 @@ def make_optical_inputs(event_key, s2, aoi, composite_method="median"):
         "delta_ndvi": delta_ndvi,
     }
 
-
 def make_optical_masks(
     event_key,
     optical,
@@ -213,7 +208,6 @@ def make_optical_masks(
         "optical_new_water": optical_new_water,
     }
 
-
 def make_fusion_map(
     event_key,
     sar_confidence,
@@ -252,7 +246,6 @@ def make_fusion_map(
     fusion = fusion.where(permanent_water, 4)
 
     return fusion.toByte()
-
 
 def make_agreement_table(
     event_key,
@@ -425,6 +418,7 @@ def export_optical_vs_sar_png(optical_results, sar_results, region, output_dir, 
         "S2 post-event + final SAR flood mask",
         dimensions,
     )
+
 
 # =============================================================================
 # Public pipeline

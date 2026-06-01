@@ -2,7 +2,6 @@ import ee
 import geemap
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from pathlib import Path
 from utils import utils_setup as us
 
@@ -56,7 +55,6 @@ def otsu_threshold(image, region, band, scale=30, max_buckets=128):
 
     return float(means[1:][int(np.argmax(scores))])
 
-
 def clean_mask(mask, permanent_water, slope, slope_threshold=5, min_connected_pixels=10):
     """Remove permanent water, steep terrain and very small isolated patches."""
     clean = (
@@ -75,6 +73,7 @@ def clean_mask(mask, permanent_water, slope, slope_threshold=5, min_connected_pi
         clean = clean.And(connected.gte(min_connected_pixels))
 
     return clean.toByte()
+
 
 # =============================================================================
 # SAR products
@@ -124,7 +123,6 @@ def make_sar_inputs(event_key, s1, aoi, speckle_radius=30):
         "ratio_vv": ratio_vv,
         "ratio_vh": ratio_vh,
     }
-
 
 def make_flood_masks(
     event_key,
@@ -261,7 +259,6 @@ def make_flood_masks(
         "otsu_valid": otsu_valid,
     }
 
-
 def make_area_table(event_key, masks, aoi, confidence_threshold=3):
     """Create a compact area table for SAR flood candidates."""
     rows = [
@@ -345,6 +342,7 @@ def make_sar_map(event, places, sar, masks):
 # =============================================================================
 # Public pipeline
 # =============================================================================
+
 def run_sar_event(
     event_key,
     event,
@@ -413,6 +411,7 @@ def run_sar_event(
         **masks,
     }
 
+
 # =============================================================================
 # SAR notebook summaries and figures
 # =============================================================================
@@ -436,7 +435,6 @@ def sar_processing_df(month, s1, sar_params, sar_results):
 
     return pd.DataFrame(rows, columns=["parameter", "value"])
 
-
 def vv_score(sar_results):
     """Return the number of VV-based flood indicators active per pixel."""
     return (
@@ -445,7 +443,6 @@ def vv_score(sar_results):
         .add(sar_results["flood_low_vv"].unmask(0))
         .rename("vv_score")
     )
-
 
 def sar_consistency_df(sar_results, aoi):
     """Check whether the final SAR flood mask is supported by VV evidence."""
