@@ -3,202 +3,93 @@ import geemap
 import pandas as pd
 from pathlib import Path
 
+from utils import config as cfg
 from utils import utils_setup as us
 
 
-WORLDCOVER_CLASSES = {
-    10: "Tree cover",
-    20: "Shrubland",
-    30: "Grassland",
-    40: "Cropland",
-    50: "Built-up",
-    60: "Bare / sparse vegetation",
-    70: "Snow and ice",
-    80: "Permanent water bodies",
-    90: "Herbaceous wetland",
-    95: "Mangroves",
-    100: "Moss and lichen",
-}
+# =============================================================================
+# Hazard, vulnerability and risk products
+# =============================================================================
 
-VULNERABILITY_CLASSES = {
-    0: "No / very low vulnerability",
-    1: "Low vulnerability",
-    2: "Medium vulnerability",
-    3: "High vulnerability",
-}
+def make_hazard_layer(sar_confidence, confidence_threshold=3, name="hazard"):
+    """
+    Convert SAR confidence into a 0-3 flood hazard class.
 
-RISK_CLASSES = {
-    0: "No / very low risk",
-    1: "Low risk",
-    2: "Medium risk",
-    3: "High risk",
-}
-
-
-def get_risk_vis_params():
-    return {
-        "hazard": {
-            "min": 0,
-            "max": 3,
-            "palette": ["ffffff", "ffffcc", "fd8d3c", "bd0026"],
-        },
-        "vulnerability_score": {
-            "min": 0,
-            "max": 5,
-            "palette": ["ffffff", "ffffcc", "fed976", "fd8d3c", "e31a1c", "800026"],
-        },
-        "vulnerability_class": {
-            "min": 0,
-            "max": 3,
-            "palette": ["ffffff", "ffffcc", "fd8d3c", "bd0026"],
-        },
-        "risk_score": {
-            "min": 0,
-            "max": 9,
-            "palette": ["ffffff", "ffffcc", "fed976", "fd8d3c", "e31a1c", "800026"],
-        },
-        "risk_class": {
-            "min": 0,
-            "max": 3,
-            "palette": ["ffffff", "ffffcc", "fd8d3c", "bd0026"],
-        },
-        "distance_to_river": {
-            "min": 0,
-            "max": 5000,
-            "palette": ["0000ff", "00ffff", "ffffff"],
-        },
-        "binary": {
-            "min": 0,
-            "max": 1,
-            "palette": ["ffffff", "ff0000"],
-        },
-        "water_occurrence": {
-            "min": 0,
-            "max": 100,
-            "palette": ["ffffff", "add8e6", "0000ff"],
-        },
-    }
-
-
-def _ee_fc_to_df(fc):
-    info = fc.getInfo()
-    features = info.get("features", [])
-
-    if len(features) == 0:
-        return pd.DataFrame()
-
-    return pd.DataFrame([feature["properties"] for feature in features])
-
-
-def _load_rivers_fc(aoi):
-    return (
-        ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers")
-        .filterBounds(aoi)
-    )
-
-
-def create_hazard_from_sar_confidence(sar_confidence, name="hazard"):
-    return (
-        sar_confidence
-        .unmask(0)
-        .rename(name)
-        .toByte()
-    )
-
-
-def create_hazard_from_fusion(fusion_map, name="hazard"):
-    fusion = fusion_map.unmask(0)
+    Classes:
+        0 = no / very low hazard
+        1 = low hazard
+        2 = medium hazard
+        3 = high hazard
+    """
+    confidence = sar_confidence.unmask(0)
 
     return (
         ee.Image(0)
-        .where(fusion.eq(2), 1)
-        .where(fusion.eq(6), 1)
-        .where(fusion.eq(1), 2)
-        .where(fusion.eq(3), 3)
+        .where(
+            confidence.gt(0).And(confidence.lt(confidence_threshold)),
+            1,
+        )
+        .where(
+            confidence.gte(confidence_threshold)
+            .And(confidence.lt(confidence_threshold + 1)),
+            2,
+        )
+        .where(
+            confidence.gte(confidence_threshold + 1),
+            3,
+        )
         .rename(name)
         .toByte()
     )
 
 
-def create_hazard_layer(hazard_input, hazard_source, name="hazard"):
-    source = hazard_source.lower()
-
-    if source == "fusion":
-        return create_hazard_from_fusion(hazard_input, name=name)
-
-    if source == "sar":
-        return create_hazard_from_sar_confidence(hazard_input, name=name)
-
-    raise ValueError("hazard_source must be either 'fusion' or 'sar'.")
-
-
-def _create_low_elevation_mask(dem, region, percentile=25, scale=30):
-    threshold = dem.reduceRegion(
-        reducer=ee.Reducer.percentile([percentile]),
-        geometry=region,
-        scale=scale,
-        maxPixels=1e13,
-        bestEffort=True,
-        tileScale=4,
-    ).get("DEM")
-
-    threshold = ee.Number(threshold)
-
-    return {
-        "threshold": threshold,
-        "mask": dem.lte(threshold).rename("low_elevation"),
-    }
-
-
-def _distance_to_rivers(rivers_fc, max_distance_m=5000, line_width=2):
-    river_raster = (
-        ee.Image()
-        .byte()
-        .paint(featureCollection=rivers_fc, color=1, width=line_width)
-        .selfMask()
-    )
-
-    return river_raster.distance(
-        kernel=ee.Kernel.euclidean(max_distance_m, "meters"),
-        skipMasked=False,
-    ).rename("distance_to_river_m")
-
-
-def create_vulnerability_layers(
+def make_vulnerability_layers(
     dem,
     slope,
     worldcover,
     water_occurrence,
-    rivers_fc,
+    rivers,
     region,
     elevation_percentile=25,
     slope_threshold=2,
     river_distance_threshold=1000,
     historical_water_threshold=10,
 ):
-    low_elev_data = _create_low_elevation_mask(
-        dem=dem,
-        region=region,
-        percentile=elevation_percentile,
-        scale=30,
+    """Create simple vulnerability factors and a 0-3 vulnerability class."""
+    elevation_threshold = ee.Number(
+        dem.reduceRegion(
+            reducer=ee.Reducer.percentile([elevation_percentile]),
+            geometry=region,
+            scale=30,
+            maxPixels=1e13,
+            bestEffort=True,
+            tileScale=4,
+        ).get("DEM")
     )
 
-    low_elevation = low_elev_data["mask"]
+    low_elevation = dem.lte(elevation_threshold).rename("low_elevation")
     low_slope = slope.lt(slope_threshold).rename("low_slope")
 
-    distance_to_river = _distance_to_rivers(
-        rivers_fc=rivers_fc,
-        max_distance_m=river_distance_threshold,
-        line_width=2,
+    rivers_raster = (
+        ee.Image()
+        .byte()
+        .paint(featureCollection=rivers, color=1, width=2)
+        .selfMask()
     )
+
+    distance_to_river = rivers_raster.distance(
+        kernel=ee.Kernel.euclidean(river_distance_threshold, "meters"),
+        skipMasked=False,
+    ).rename("distance_to_river_m")
 
     near_river = distance_to_river.lt(river_distance_threshold).rename("near_river")
 
-    exposed_landcover = (
-        worldcover.eq(40)
-        .Or(worldcover.eq(50))
-        .rename("exposed_landcover")
-    )
+    exposed_landcover = ee.Image(0)
+
+    for class_value in cfg.EXPOSED_WORLDCOVER_CLASSES:
+        exposed_landcover = exposed_landcover.Or(worldcover.eq(class_value))
+
+    exposed_landcover = exposed_landcover.rename("exposed_landcover")
 
     historical_water = (
         water_occurrence
@@ -227,7 +118,7 @@ def create_vulnerability_layers(
     )
 
     return {
-        "low_elevation_threshold": low_elev_data["threshold"],
+        "elevation_threshold": elevation_threshold,
         "low_elevation": low_elevation,
         "low_slope": low_slope,
         "distance_to_river": distance_to_river,
@@ -239,7 +130,8 @@ def create_vulnerability_layers(
     }
 
 
-def create_risk_map(hazard, vulnerability_class, name="risk"):
+def make_risk_layers(hazard, vulnerability_class, name="risk"):
+    """Combine flood hazard and vulnerability into risk score and risk class."""
     risk_score = (
         hazard.unmask(0)
         .multiply(vulnerability_class.unmask(0))
@@ -249,9 +141,9 @@ def create_risk_map(hazard, vulnerability_class, name="risk"):
 
     risk_class = (
         ee.Image(0)
-        .where(risk_score.gte(1).And(risk_score.lte(3)), 1)
-        .where(risk_score.gte(4).And(risk_score.lte(6)), 2)
-        .where(risk_score.gt(6), 3)
+        .where(risk_score.gte(1).And(risk_score.lte(2)), 1)
+        .where(risk_score.gte(3).And(risk_score.lte(5)), 2)
+        .where(risk_score.gte(6), 3)
         .rename(f"{name}_class")
         .toByte()
     )
@@ -262,42 +154,12 @@ def create_risk_map(hazard, vulnerability_class, name="risk"):
     }
 
 
-def area_by_worldcover(binary_mask, worldcover, region, event_key, scale=10):
-    mask = binary_mask.unmask(0).gt(0)
+# =============================================================================
+# Tables
+# =============================================================================
 
-    area_image = (
-        ee.Image.pixelArea()
-        .divide(1e6)
-        .rename("area")
-        .updateMask(mask)
-        .addBands(worldcover.rename("class"))
-    )
-
-    result = area_image.reduceRegion(
-        reducer=ee.Reducer.sum().group(groupField=1, groupName="class"),
-        geometry=region,
-        scale=scale,
-        maxPixels=1e13,
-        bestEffort=True,
-        tileScale=4,
-    ).get("groups").getInfo()
-
-    rows = []
-
-    if result is not None:
-        for item in result:
-            class_value = int(item["class"])
-            rows.append({
-                "event": event_key,
-                "worldcover_class": class_value,
-                "worldcover_label": WORLDCOVER_CLASSES.get(class_value, "Unknown"),
-                "area_km2": float(item["sum"]),
-            })
-
-    return pd.DataFrame(rows)
-
-
-def area_by_class(class_image, class_dict, region, event_key, scale=10):
+def area_by_class(class_image, class_labels, region, event_key, scale=10):
+    """Compute area grouped by a categorical class image."""
     area_image = (
         ee.Image.pixelArea()
         .divide(1e6)
@@ -305,7 +167,7 @@ def area_by_class(class_image, class_dict, region, event_key, scale=10):
         .addBands(class_image.unmask(0).rename("class"))
     )
 
-    result = area_image.reduceRegion(
+    groups = area_image.reduceRegion(
         reducer=ee.Reducer.sum().group(groupField=1, groupName="class"),
         geometry=region,
         scale=scale,
@@ -316,168 +178,222 @@ def area_by_class(class_image, class_dict, region, event_key, scale=10):
 
     rows = []
 
-    if result is not None:
-        for item in result:
+    if groups is not None:
+        for item in groups:
             class_value = int(item["class"])
             rows.append({
                 "event": event_key,
                 "class": class_value,
-                "label": class_dict.get(class_value, "Unknown"),
+                "label": class_labels.get(class_value, "Unknown"),
                 "area_km2": float(item["sum"]),
             })
 
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows).sort_values("class").reset_index(drop=True)
 
 
-def roi_statistics(
-    hazard,
-    risk_class,
-    worldcover,
-    roi_zones,
-    event_key,
-    scale=20,
-):
-    """
-    Compute flood/risk/exposure statistics over predefined ROI polygons.
+def exposure_by_worldcover(hazard, worldcover, region, event_key, scale=10):
+    """Compute medium/high flood hazard area grouped by WorldCover class."""
+    hazard_mask = hazard.gte(2)
 
-    This is preferable to city-point buffers because flood impacts usually occur
-    over floodplain areas, agricultural zones, river corridors, or municipal
-    surroundings, not necessarily at the exact city-centre point.
-    """
-
-    hazard_mask = hazard.gte(2).unmask(0)
-    high_risk_mask = risk_class.eq(3).unmask(0)
-
-    builtup = worldcover.eq(50).unmask(0)
-    cropland = worldcover.eq(40).unmask(0)
-
-    pixel_area_km2 = ee.Image.pixelArea().divide(1e6)
-
-    area_image = ee.Image.cat([
-        hazard_mask.multiply(pixel_area_km2).rename("flood_area_km2"),
-        high_risk_mask.multiply(pixel_area_km2).rename("high_risk_area_km2"),
-        hazard_mask.And(builtup).multiply(pixel_area_km2).rename("builtup_flooded_km2"),
-        hazard_mask.And(cropland).multiply(pixel_area_km2).rename("cropland_flooded_km2"),
-    ])
-
-    def add_event_property(feat):
-        return ee.Feature(feat).set("event", event_key)
-
-    roi_zones = roi_zones.map(add_event_property)
-
-    stats_fc = area_image.reduceRegions(
-        collection=roi_zones,
-        reducer=ee.Reducer.sum(),
-        scale=scale,
-        tileScale=4,
+    area_image = (
+        ee.Image.pixelArea()
+        .divide(1e6)
+        .rename("area")
+        .updateMask(hazard_mask)
+        .addBands(worldcover.rename("class"))
     )
 
-    df = _ee_fc_to_df(stats_fc)
+    groups = area_image.reduceRegion(
+        reducer=ee.Reducer.sum().group(groupField=1, groupName="class"),
+        geometry=region,
+        scale=scale,
+        maxPixels=1e13,
+        bestEffort=True,
+        tileScale=4,
+    ).get("groups").getInfo()
 
-    if df.empty:
-        return df
+    rows = []
 
-    keep_cols = [
-        "event",
-        "name",
-        "flood_area_km2",
-        "high_risk_area_km2",
-        "builtup_flooded_km2",
-        "cropland_flooded_km2",
+    if groups is not None:
+        for item in groups:
+            class_value = int(item["class"])
+            rows.append({
+                "event": event_key,
+                "worldcover_class": class_value,
+                "worldcover_label": cfg.WORLDCOVER_CLASSES.get(class_value, "Unknown"),
+                "area_km2": float(item["sum"]),
+            })
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values("area_km2", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def final_processing_df(event_key, risk_params, final_results):
+    """Create a compact vertical summary of the final workflow settings."""
+    rows = [
+        ("Event", event_key),
+        ("Hazard source", "Sentinel-1 SAR confidence"),
+        ("Elevation percentile", risk_params.get("elevation_percentile")),
+        (
+            "Low-elevation threshold",
+            round(final_results["elevation_threshold"].getInfo(), 2),
+        ),
+        ("Slope threshold", f"{risk_params.get('slope_threshold')}°"),
+        (
+            "River distance threshold",
+            f"{risk_params.get('river_distance_threshold')} m",
+        ),
+        (
+            "Historical water threshold",
+            f"{risk_params.get('historical_water_threshold')}%",
+        ),
     ]
 
-    df = df[[col for col in keep_cols if col in df.columns]]
-
-    numeric_cols = [
-        "flood_area_km2",
-        "high_risk_area_km2",
-        "builtup_flooded_km2",
-        "cropland_flooded_km2",
-    ]
-
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = df[col].fillna(0.0)
-
-    return df.sort_values("flood_area_km2", ascending=False).reset_index(drop=True)
+    return pd.DataFrame(rows, columns=["parameter", "value"])
 
 
-def make_final_risk_map(
-    event,
-    places,
-    hazard,
-    vulnerability,
-    risk_score,
-    risk_class,
-    water_occurrence,
-    vis,
-):
+# =============================================================================
+# Map and figures
+# =============================================================================
+
+def make_final_map(event, places, hazard, vulnerability, risk):
+    """Create a simple interactive final risk map."""
     aoi = event["aoi"]
+    vis = us.get_vis_params()
 
-    raster_layers = [
-        {"image": hazard.selfMask(), "vis": vis["hazard"], "name": "Flood hazard", "shown": False},
-        {"image": vulnerability["vulnerability_score"].clip(aoi), "vis": vis["vulnerability_score"], "name": "Vulnerability score", "shown": False},
-        {"image": vulnerability["vulnerability_class"].selfMask().clip(aoi), "vis": vis["vulnerability_class"], "name": "Vulnerability class", "shown": False},
-        {"image": risk_score.selfMask().clip(aoi), "vis": vis["risk_score"], "name": "Risk score", "shown": False},
-        {"image": risk_class.selfMask().clip(aoi), "vis": vis["risk_class"], "name": "Risk class", "shown": True},
-        {"image": vulnerability["distance_to_river"].clip(aoi), "vis": vis["distance_to_river"], "name": "Distance to river", "shown": False},
-        {"image": vulnerability["low_elevation"].selfMask().clip(aoi), "vis": vis["binary"], "name": "Low elevation", "shown": False},
-        {"image": vulnerability["low_slope"].selfMask().clip(aoi), "vis": vis["binary"], "name": "Low slope", "shown": False},
-        {"image": vulnerability["near_river"].selfMask().clip(aoi), "vis": vis["binary"], "name": "Near river", "shown": False},
-        {"image": vulnerability["exposed_landcover"].selfMask().clip(aoi), "vis": vis["binary"], "name": "Exposed land cover", "shown": False},
-        {"image": water_occurrence.clip(aoi), "vis": vis["water_occurrence"], "name": "JRC water occurrence", "shown": False},
+    layers = [
+        (hazard.selfMask().clip(aoi), vis["hazard"], "Flood hazard class", False),
+        (
+            vulnerability["vulnerability_class"].selfMask().clip(aoi),
+            vis["vulnerability_class"],
+            "Vulnerability class",
+            False,
+        ),
+        (
+            risk["risk_class"].selfMask().clip(aoi),
+            vis["risk_class"],
+            "Final risk class",
+            True,
+        ),
+        (
+            vulnerability["distance_to_river"].clip(aoi),
+            vis["distance_to_river"],
+            "Distance to river",
+            False,
+        ),
+        (
+            vulnerability["low_elevation"].selfMask().clip(aoi),
+            vis["binary_red"],
+            "Low elevation",
+            False,
+        ),
+        (
+            vulnerability["low_slope"].selfMask().clip(aoi),
+            vis["binary_red"],
+            "Low slope",
+            False,
+        ),
+        (
+            vulnerability["near_river"].selfMask().clip(aoi),
+            vis["binary_red"],
+            "Near river",
+            False,
+        ),
+        (
+            vulnerability["exposed_landcover"].selfMask().clip(aoi),
+            vis["binary_red"],
+            "Exposed land cover",
+            False,
+        ),
+        (
+            vulnerability["historical_water"].selfMask().clip(aoi),
+            vis["binary_red"],
+            "Historical water occurrence",
+            False,
+        ),
     ]
 
     m = geemap.Map(center=event["center"], zoom=event["zoom"])
-    us.add_layers(m, raster_layers)
 
-    m.addLayer(ee.FeatureCollection([ee.Feature(aoi)]).style(color=event.get("aoi_color", "red"), fillColor="00000000", width=2), {}, event.get("aoi_label", "AOI"))
-    m.addLayer(places.filterBounds(aoi).style(color="000000", pointSize=5, pointShape="circle"), {}, "Places")
+    for image, layer_vis, name, shown in layers:
+        m.addLayer(image, layer_vis, name, shown)
+
+    m.addLayer(
+        us.styled_aoi(aoi, color=event.get("aoi_color", "red")),
+        {},
+        event.get("aoi_label", "AOI"),
+    )
+
+    if places is not None:
+        m.addLayer(
+            us.styled_places(places, aoi),
+            {},
+            "Places",
+        )
+
     m.addLayerControl()
 
     return m
 
 
-def run_final_risk_event(
+def export_hazard_vs_risk_png(final_results, region, output_dir, month, dimensions=900):
+    """Export hazard and final risk class side by side."""
+    vis = us.get_vis_params()
+
+    return us.export_side_by_side_ee_images(
+        left_image=final_results["hazard"],
+        right_image=final_results["risk_class"],
+        region=region,
+        vis_params=vis["risk_class"],
+        output_path=Path(output_dir) / f"{month}_hazard_vs_final_risk.png",
+        left_title="Flood hazard class",
+        right_title="Final risk class",
+        dimensions=dimensions,
+    )
+
+
+# =============================================================================
+# Public pipeline
+# =============================================================================
+
+def run_final_event(
     event_key,
     event,
-    hazard_input,
-    hazard_source,
+    sar_confidence,
     dem,
     slope,
     worldcover,
     water_occurrence,
-    places,
-    output_dir,
+    rivers,
+    places=None,
+    output_dir=None,
+    make_map=True,
+    confidence_threshold=3,
     elevation_percentile=25,
     slope_threshold=2,
     river_distance_threshold=1000,
     historical_water_threshold=10,
-    roi_buffer_m=3000,
-    make_map=True,
-    vis=None,
+    roi_buffer_m=None,
+    **unused_params,
 ):
-    if vis is None:
-        vis = get_risk_vis_params()
-
+    """Run the final SAR-based hazard, vulnerability and risk workflow."""
     aoi = event["aoi"]
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
-    rivers_fc = _load_rivers_fc(aoi)
-
-    hazard = create_hazard_layer(
-        hazard_input=hazard_input,
-        hazard_source=hazard_source,
+    hazard = make_hazard_layer(
+        sar_confidence=sar_confidence,
+        confidence_threshold=confidence_threshold,
         name=f"{event_key}_hazard",
     )
 
-    vulnerability = create_vulnerability_layers(
+    vulnerability = make_vulnerability_layers(
         dem=dem,
         slope=slope,
         worldcover=worldcover,
         water_occurrence=water_occurrence,
-        rivers_fc=rivers_fc,
+        rivers=rivers,
         region=aoi,
         elevation_percentile=elevation_percentile,
         slope_threshold=slope_threshold,
@@ -485,14 +401,14 @@ def run_final_risk_event(
         historical_water_threshold=historical_water_threshold,
     )
 
-    risk = create_risk_map(
+    risk = make_risk_layers(
         hazard=hazard,
         vulnerability_class=vulnerability["vulnerability_class"],
         name=f"{event_key}_risk",
     )
 
-    df_exposure = area_by_worldcover(
-        binary_mask=hazard.gte(2),
+    df_exposure = exposure_by_worldcover(
+        hazard=hazard,
         worldcover=worldcover,
         region=aoi,
         event_key=event_key,
@@ -501,7 +417,7 @@ def run_final_risk_event(
 
     df_vulnerability_area = area_by_class(
         class_image=vulnerability["vulnerability_class"],
-        class_dict=VULNERABILITY_CLASSES,
+        class_labels=cfg.VULNERABILITY_CLASSES,
         region=aoi,
         event_key=event_key,
         scale=30,
@@ -509,58 +425,72 @@ def run_final_risk_event(
 
     df_risk_area = area_by_class(
         class_image=risk["risk_class"],
-        class_dict=RISK_CLASSES,
+        class_labels=cfg.RISK_CLASSES,
         region=aoi,
         event_key=event_key,
         scale=10,
     )
 
-    roi_zones = event.get("roi_zones", None)
-
-    if roi_zones is not None:
-        df_roi = roi_statistics(
-            hazard=hazard,
-            risk_class=risk["risk_class"],
-            worldcover=worldcover,
-            roi_zones=roi_zones,
-            event_key=event_key,
-            scale=20,
-        )
-    else:
-        df_roi = pd.DataFrame()
-
-    df_exposure.to_csv(output_dir / f"{event_key}_final_exposure_by_worldcover.csv", index=False)
-    df_vulnerability_area.to_csv(output_dir / f"{event_key}_final_vulnerability_area.csv", index=False)
-    df_risk_area.to_csv(output_dir / f"{event_key}_final_risk_area.csv", index=False)
-    df_roi.to_csv(output_dir / f"{event_key}_final_roi_statistics.csv", index=False)
-
-    final_map = None
-
-    if make_map:
-        final_map = make_final_risk_map(
-            event=event,
-            places=places,
-            hazard=hazard,
-            vulnerability=vulnerability,
-            risk_score=risk["risk_score"],
-            risk_class=risk["risk_class"],
-            water_occurrence=water_occurrence,
-            vis=vis,
-        )
-
-    return {
-        "event": event_key,
-        "hazard_source": hazard_source,
+    result = {
         "hazard": hazard,
         "vulnerability": vulnerability,
         "vulnerability_score": vulnerability["vulnerability_score"],
         "vulnerability_class": vulnerability["vulnerability_class"],
         "risk_score": risk["risk_score"],
         "risk_class": risk["risk_class"],
+        "elevation_threshold": vulnerability["elevation_threshold"],
         "df_exposure": df_exposure,
         "df_vulnerability_area": df_vulnerability_area,
         "df_risk_area": df_risk_area,
-        "df_roi": df_roi,
-        "low_elevation_threshold": vulnerability["low_elevation_threshold"],
-        "map": final_map,
     }
+
+    risk_params = {
+        "elevation_percentile": elevation_percentile,
+        "slope_threshold": slope_threshold,
+        "river_distance_threshold": river_distance_threshold,
+        "historical_water_threshold": historical_water_threshold,
+    }
+
+    result["df_processing"] = final_processing_df(
+        event_key=event_key,
+        risk_params=risk_params,
+        final_results=result,
+    )
+
+    result["map"] = (
+        make_final_map(
+            event=event,
+            places=places,
+            hazard=hazard,
+            vulnerability=vulnerability,
+            risk=risk,
+        )
+        if make_map
+        else None
+    )
+
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        result["df_processing"].to_csv(
+            output_dir / f"{event_key}_final_processing_summary.csv",
+            index=False,
+        )
+
+        df_exposure.to_csv(
+            output_dir / f"{event_key}_final_exposure_by_worldcover.csv",
+            index=False,
+        )
+
+        df_vulnerability_area.to_csv(
+            output_dir / f"{event_key}_final_vulnerability_area.csv",
+            index=False,
+        )
+
+        df_risk_area.to_csv(
+            output_dir / f"{event_key}_final_risk_area.csv",
+            index=False,
+        )
+
+    return result

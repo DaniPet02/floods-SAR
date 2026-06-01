@@ -1,62 +1,197 @@
 import ee
 import geemap
 import pandas as pd
-from pathlib import Path
 import requests
-from PIL import Image, ImageDraw
+from io import BytesIO
+from pathlib import Path
 from IPython.display import Image as IPyImage
+from PIL import Image, ImageDraw
+import json
+import hashlib
+_CACHE = {}
 
 
-def load_sentinel1(aoi, start_date, end_date, orbit_pass=None, relative_orbit=None):
-    collection = (
-        ee.ImageCollection("COPERNICUS/S1_GRD")
-        .filterBounds(aoi)
-        .filterDate(start_date, end_date)
-        .filter(ee.Filter.eq("instrumentMode", "IW"))
-        .filter(ee.Filter.eq("resolution_meters", 10))
-        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
-        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
+def cache_key(stage, month, params=None, version="v1"):
+    text = json.dumps(
+        {"stage": stage, "month": month, "params": params or {}, "version": version},
+        sort_keys=True,
+        default=str,
     )
-
-    if orbit_pass is not None:
-        collection = collection.filter(ee.Filter.eq("orbitProperties_pass", orbit_pass))
-
-    if relative_orbit is not None:
-        collection = collection.filter(ee.Filter.eq("relativeOrbitNumber_start", int(relative_orbit)))
-
-    return collection
+    return f"{stage}_{month}_{hashlib.md5(text.encode()).hexdigest()[:8]}"
 
 
-def load_sentinel2_raw(aoi, start_date, end_date, max_cloud=95):
-    return (
-        ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-        .filterBounds(aoi)
-        .filterDate(start_date, end_date)
-        .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", max_cloud))
-    )
+def cached(stage, month, params, compute_fn, use_cache=True, version="v1"):
+    key = cache_key(stage, month, params, version)
+
+    if use_cache and key in _CACHE:
+        print(f"Using cached {stage} for {month}.")
+        return _CACHE[key]
+
+    print(f"Computing {stage} for {month}.")
+    _CACHE[key] = compute_fn()
+    return _CACHE[key]
+
+
+def clear_cache(stage=None):
+    if stage is None:
+        _CACHE.clear()
+    else:
+        for key in list(_CACHE):
+            if key.startswith(f"{stage}_"):
+                del _CACHE[key]
+
+# =============================================================================
+# Dataset loading
+# =============================================================================
+
+def load_event_datasets(aoi, dates, event, sar_params=None, optical_params=None):
+    """
+    Load Sentinel-1 and Sentinel-2 collections for one selected flood event.
+
+    The function loads pre-event, post-event and recovery windows.
+    Auxiliary datasets are loaded separately because they are static layers,
+    not event-specific satellite acquisitions.
+    """
+    sar_params = sar_params or {}
+    optical_params = optical_params or {}
+
+    orbit_pass = sar_params.get("orbit_pass_override")
+    relative_orbit = sar_params.get("relative_orbit_override")
+
+    s1 = {}
+    s1_all = {}
+    s1_orbits = {}
+    s2 = {}
+
+    for window in ["pre", "post", "recovery"]:
+        # ---------------------------------------------------------------------
+        # Sentinel-1 SAR
+        # ---------------------------------------------------------------------
+        start_date, end_date = dates[event[window]]
+
+        s1_base = (
+            ee.ImageCollection("COPERNICUS/S1_GRD")
+            .filterBounds(aoi)
+            .filterDate(start_date, end_date)
+            .filter(ee.Filter.eq("instrumentMode", "IW"))
+            .filter(ee.Filter.eq("resolution_meters", 10))
+            .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
+            .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
+        )
+
+        s1_all[window] = s1_base
+
+        s1_selected = s1_base
+
+        if orbit_pass is not None:
+            s1_selected = s1_selected.filter(
+                ee.Filter.eq("orbitProperties_pass", orbit_pass)
+            )
+
+        if relative_orbit is not None:
+            s1_selected = s1_selected.filter(
+                ee.Filter.eq("relativeOrbitNumber_start", int(relative_orbit))
+            )
+
+        s1[window] = s1_selected
+
+        # Orbit diagnostics are useful only for pre/post comparison.
+        if window in ["pre", "post"]:
+            s1_orbits[f"{window}_ASC"] = s1_base.filter(
+                ee.Filter.eq("orbitProperties_pass", "ASCENDING")
+            )
+            s1_orbits[f"{window}_DESC"] = s1_base.filter(
+                ee.Filter.eq("orbitProperties_pass", "DESCENDING")
+            )
+
+        # ---------------------------------------------------------------------
+        # Sentinel-2 optical
+        # ---------------------------------------------------------------------
+        optical_date_key = optical_params.get(
+            f"{window}_window_override",
+            event[window],
+        )
+
+        optical_start, optical_end = dates[optical_date_key]
+
+        max_cloud = {
+            "pre": optical_params.get("max_cloud_pre", 95),
+            "post": optical_params.get("max_cloud_post", 100),
+            "recovery": optical_params.get("max_cloud_recovery", 95),
+        }[window]
+
+        s2[window] = (
+            ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+            .filterBounds(aoi)
+            .filterDate(optical_start, optical_end)
+            .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", max_cloud))
+        )
+
+    availability = {
+        "S1 pre-event ALL": s1_all["pre"],
+        "S1 post-event ALL": s1_all["post"],
+        "S1 recovery ALL": s1_all["recovery"],
+        "S1 pre-event selected orbit": s1["pre"],
+        "S1 post-event selected orbit": s1["post"],
+        "S1 recovery selected orbit": s1["recovery"],
+        "S1 pre-event ASC": s1_orbits["pre_ASC"],
+        "S1 post-event ASC": s1_orbits["post_ASC"],
+        "S1 pre-event DESC": s1_orbits["pre_DESC"],
+        "S1 post-event DESC": s1_orbits["post_DESC"],
+        "S2 pre-event raw": s2["pre"],
+        "S2 post-event raw": s2["post"],
+        "S2 recovery raw": s2["recovery"],
+    }
+
+    return {
+        "s1": s1,
+        "s1_all": s1_all,
+        "s1_orbits": s1_orbits,
+        "s2": s2,
+        "availability": availability,
+    }
 
 
 def load_auxiliary_datasets(aoi):
+    """
+    Load static auxiliary layers used for flood post-processing and interpretation.
+
+    These layers are not tied to a specific event date:
+    - JRC Global Surface Water
+    - permanent water mask
+    - ESA WorldCover
+    - Copernicus DEM
+    - slope
+    - HydroSHEDS rivers
+    """
     jrc_water = ee.Image("JRC/GSW1_4/GlobalSurfaceWater")
     water_occurrence = jrc_water.select("occurrence").unmask(0)
     permanent_water = water_occurrence.gt(80).rename("permanent_water")
 
     worldcover = ee.ImageCollection("ESA/WorldCover/v200").first().select("Map")
+
     worldcover_classes = [10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100]
     worldcover_remap = worldcover.remap(
         worldcover_classes,
-        list(range(len(worldcover_classes)))
+        list(range(len(worldcover_classes))),
     ).rename("WorldCover_remap")
 
     dem_collection = ee.ImageCollection("COPERNICUS/DEM/GLO30").select("DEM")
-    dem = dem_collection.mosaic().setDefaultProjection(dem_collection.first().projection())
+    dem = dem_collection.mosaic().setDefaultProjection(
+        dem_collection.first().projection()
+    )
+
     slope = ee.Terrain.slope(dem).rename("slope")
 
-    rivers = ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers").filterBounds(aoi)
+    rivers = (
+        ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers")
+        .filterBounds(aoi)
+    )
+
     rivers_image = ee.Image().byte().paint(
         featureCollection=rivers,
         color=1,
-        width=2
+        width=2,
     )
 
     return {
@@ -72,596 +207,297 @@ def load_auxiliary_datasets(aoi):
     }
 
 
+# =============================================================================
+# Tables and quick summaries
+# =============================================================================
+
 def collection_sizes(collections, output_path=None):
+    """
+    Return a table with the number of images in each Earth Engine collection.
+
+    This is useful at the beginning of the notebook to justify the selected
+    pre-event and post-event windows.
+    """
     rows = [
-        {"Dataset window": name, "Number of images": collection.size().getInfo()}
+        {
+            "Dataset window": name,
+            "Number of images": collection.size().getInfo(),
+        }
         for name, collection in collections.items()
     ]
 
     df = pd.DataFrame(rows)
 
     if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(output_path, index=False)
 
     return df
 
+# =============================================================================
+# Visualization parameters
+# =============================================================================
 def get_vis_params():
+    """Centralized visualization parameters for maps and PNG exports."""
     return {
+        # Sentinel-1 SAR
         "s1_vv": {
             "min": -25,
-            "max": 0
+            "max": 0,
         },
-        "s1_difference": {
+        "s1_change": {
             "min": -5,
             "max": 5,
-            "palette": ["blue", "white", "red"]
+            "palette": ["blue", "white", "red"],
         },
+
+        # Sentinel-2 raw DN-style preview, kept for setup/context cells.
         "s2_true_color": {
             "bands": ["B4", "B3", "B2"],
             "min": 0,
-            "max": 3000
+            "max": 3000,
         },
+
+        # Sentinel-2 scaled reflectance products used by utils_optical.
+        "true_color": {
+            "bands": ["B4", "B3", "B2"],
+            "min": 0.0,
+            "max": 0.30,
+        },
+        "false_color": {
+            "bands": ["B8", "B4", "B3"],
+            "min": 0.0,
+            "max": 0.45,
+        },
+        "ndwi": {
+            "min": -0.5,
+            "max": 0.8,
+            "palette": ["8c510a", "ffffff", "01665e", "003c8f"],
+        },
+        "mndwi": {
+            "min": -0.5,
+            "max": 0.8,
+            "palette": ["8c510a", "ffffff", "80cdc1", "003c8f"],
+        },
+        "ndvi": {
+            "min": -0.2,
+            "max": 0.8,
+            "palette": ["8c510a", "ffffbf", "1a9850"],
+        },
+        "delta_index": {
+            "min": -0.5,
+            "max": 0.5,
+            "palette": ["a50026", "ffffff", "313695"],
+        },
+        "optical_water": {
+            "min": 0,
+            "max": 1,
+            "palette": ["ffffff", "0000ff"],
+        },
+        "optical_valid": {
+            "min": 0,
+            "max": 1,
+            "palette": ["ff0000", "00ff00"],
+        },
+        "sar_confidence": {
+            "min": 0,
+            "max": 5,
+            "palette": ["ffffff", "ffff00", "ff9900", "ff0000", "990000"],
+        },
+        "fusion": {
+            "min": 0,
+            "max": 6,
+            "palette": [
+                "ffffff",  # 0 no flood
+                "1f78b4",  # 1 SAR only
+                "33a02c",  # 2 optical only
+                "e31a1c",  # 3 SAR + optical
+                "08306b",  # 4 permanent water
+                "bdbdbd",  # 5 cloud / no optical data
+                "ff7f00",  # 6 low-confidence SAR
+            ],
+        },
+        "hazard": {
+            "min": 0,
+            "max": 3,
+            "palette": ["ffffff", "ffffcc", "fd8d3c", "bd0026"],
+        },
+        "vulnerability_score": {
+            "min": 0,
+            "max": 5,
+            "palette": ["ffffff", "ffffcc", "fed976", "fd8d3c", "e31a1c", "800026"],
+        },
+        "vulnerability_class": {
+            "min": 0,
+            "max": 3,
+            "palette": ["ffffff", "ffffcc", "fd8d3c", "bd0026"],
+        },
+        "risk_score": {
+            "min": 0,
+            "max": 9,
+            "palette": ["ffffff", "ffffcc", "fed976", "fd8d3c", "e31a1c", "800026"],
+        },
+        "risk_class": {
+            "min": 0,
+            "max": 3,
+            "palette": ["ffffff", "ffffcc", "fd8d3c", "bd0026"],
+        },
+        "distance_to_river": {
+            "min": 0,
+            "max": 5000,
+            "palette": ["0000ff", "00ffff", "ffffff"],
+        },
+        "binary_red": {
+            "min": 0,
+            "max": 1,
+            "palette": ["ffffff", "ff0000"],
+        },
+
         "water_occurrence": {
             "min": 0,
             "max": 100,
-            "palette": ["white", "lightblue", "blue"]
+            "palette": ["white", "lightblue", "blue"],
         },
         "permanent_water": {
             "min": 0,
             "max": 1,
-            "palette": ["white", "blue"]
+            "palette": ["white", "blue"],
         },
         "dem": {
             "min": 0,
             "max": 500,
-            "palette": ["blue", "green", "yellow", "brown", "white"]
+            "palette": ["blue", "green", "yellow", "brown", "white"],
         },
         "slope": {
             "min": 0,
             "max": 20,
-            "palette": ["white", "yellow", "orange", "red"]
+            "palette": ["white", "yellow", "orange", "red"],
         },
         "worldcover": {
             "min": 0,
             "max": 10,
             "palette": [
-                "006400",
-                "ffbb22",
-                "ffff4c",
-                "f096ff",
-                "fa0000",
-                "b4b4b4",
-                "f0f0f0",
-                "0064c8",
-                "0096a0",
-                "00cf75",
-                "fae6a0"
-            ]
+                "006400",  # trees
+                "ffbb22",  # shrubland
+                "ffff4c",  # grassland
+                "f096ff",  # cropland
+                "fa0000",  # built-up
+                "b4b4b4",  # bare/sparse vegetation
+                "f0f0f0",  # snow/ice
+                "0064c8",  # permanent water
+                "0096a0",  # herbaceous wetland
+                "00cf75",  # mangroves
+                "fae6a0",  # moss/lichen
+            ],
         },
         "rivers": {
             "min": 0,
             "max": 1,
-            "palette": ["ffffff", "0000ff"]
+            "palette": ["ffffff", "0000ff"],
+        },
+        "flood": {
+            "min": 0,
+            "max": 1,
+            "palette": ["00ffff"],
         },
     }
 
-
-def add_layers(map_obj, layer_specs):
-    for spec in layer_specs:
-        map_obj.addLayer(
-            spec["image"],
-            spec.get("vis", {}),
-            spec["name"],
-            spec.get("shown", True)
-        )
-
-
-def build_event_raster_layers(
-    event_key,
-    event,
-    s1_vv,
-    s2_rgb,
-    water_occurrence,
-    permanent_water,
-    vis,
-    include_seasonal_reference=False,
-    show_s2_previews_by_default=False,
-    show_water_on_event_map=False,
-    seasonal_layers=None,
-):
-    layers = [
-        {
-            "image": s1_vv[event_key]["pre"],
-            "vis": vis["s1_vv"],
-            "name": f"S1 VV {event['name']} pre-event",
-            "shown": True,
-        },
-        {
-            "image": s1_vv[event_key]["post"],
-            "vis": vis["s1_vv"],
-            "name": f"S1 VV {event['name']} post-event",
-            "shown": False,
-        },
-        {
-            "image": s2_rgb[event_key]["pre"],
-            "vis": vis["s2_true_color"],
-            "name": f"S2 RGB {event['name']} pre-event preview",
-            "shown": show_s2_previews_by_default,
-        },
-        {
-            "image": s2_rgb[event_key]["post"],
-            "vis": vis["s2_true_color"],
-            "name": f"S2 RGB {event['name']} post-event preview",
-            "shown": False,
-        },
-        {
-            "image": water_occurrence.clip(event["aoi"]),
-            "vis": vis["water_occurrence"],
-            "name": "JRC Water Occurrence",
-            "shown": show_water_on_event_map,
-        },
-        {
-            "image": permanent_water.clip(event["aoi"]),
-            "vis": vis["permanent_water"],
-            "name": "Permanent Water > 80%",
-            "shown": False,
-        },
-    ]
-
-    if (
-        event_key == "sept"
-        and include_seasonal_reference
-        and seasonal_layers is not None
-    ):
-        layers.extend([
-            {
-                "image": seasonal_layers["s1_vv"],
-                "vis": vis["s1_vv"],
-                "name": "S1 VV seasonal reference 2023",
-                "shown": False,
-            },
-            {
-                "image": seasonal_layers["s1_difference"],
-                "vis": vis["s1_difference"],
-                "name": "S1 VV 2024 pre - 2023 seasonal ref",
-                "shown": False,
-            },
-            {
-                "image": seasonal_layers["s2_rgb"],
-                "vis": vis["s2_true_color"],
-                "name": "S2 RGB seasonal reference 2023",
-                "shown": False,
-            },
-        ])
-
-    return layers
-
-
-def make_setup_event_map(
-    event_key,
-    events,
-    aoi_style,
-    places_style,
-    rivers_image,
-    s1_vv,
-    s2_rgb,
-    water_occurrence,
-    permanent_water,
-    vis,
-    include_seasonal_reference=False,
-    show_rivers_by_default=False,
-    show_s2_previews_by_default=False,
-    show_water_on_event_map=False,
-    seasonal_layers=None,
-):
-    event = events[event_key]
-
-    raster_layers = build_event_raster_layers(
-        event_key=event_key,
-        event=event,
-        s1_vv=s1_vv,
-        s2_rgb=s2_rgb,
-        water_occurrence=water_occurrence,
-        permanent_water=permanent_water,
-        vis=vis,
-        include_seasonal_reference=include_seasonal_reference,
-        show_s2_previews_by_default=show_s2_previews_by_default,
-        show_water_on_event_map=show_water_on_event_map,
-        seasonal_layers=seasonal_layers,
+def styled_aoi(aoi, color="red", width=2):
+    """Return an AOI geometry as a transparent styled FeatureCollection."""
+    return ee.FeatureCollection([ee.Feature(aoi)]).style(
+        color=color,
+        fillColor="00000000",
+        width=width,
     )
 
+
+def styled_places(places, aoi, color="000000", point_size=4, point_shape="circle"):
+    """Return place points inside an AOI as a styled FeatureCollection."""
+    return places.filterBounds(aoi).style(
+        color=color,
+        pointSize=point_size,
+        pointShape=point_shape,
+    )
+
+def make_context_map(event, aoi, places):
+    """
+    Create a simple context map showing only the study area and relevant places.
+    This map is only used for orientation at the beginning of the notebook.
+    """
     m = geemap.Map(center=event["center"], zoom=event["zoom"])
 
-    add_layers(m, raster_layers)
-
     m.addLayer(
-        rivers_image.clip(event["aoi"]),
-        vis["rivers"],
-        "HydroSHEDS rivers",
-        show_rivers_by_default
+        styled_aoi(
+            aoi,
+            color=event.get("aoi_color", "red"),
+        ),
+        {},
+        event.get("aoi_label", "AOI"),
     )
 
     m.addLayer(
-        aoi_style,
+        styled_places(
+            places,
+            aoi,
+        ),
         {},
-        event.get("aoi_label", "AOI")
-    )
-
-    m.addLayer(
-        places_style,
-        {},
-        "Places"
+        "Places",
     )
 
     m.addLayerControl()
-
     return m
 
-def make_auxiliary_map(
-    center,
-    zoom,
-    aoi,
-    aoi_styles,
-    places_style,
-    rivers_image,
-    auxiliary,
-    vis,
-    default_layer="jrc",
-):
-    m = geemap.Map(center=center, zoom=zoom)
+# =============================================================================
+# Composite helpers
+# =============================================================================
 
-    layer_specs = [
-        {
-            "key": "jrc",
-            "image": auxiliary["water_occurrence"].clip(aoi),
-            "vis": vis["water_occurrence"],
-            "name": "JRC Water Occurrence",
-        },
-        {
-            "key": "permanent_water",
-            "image": auxiliary["permanent_water"].clip(aoi),
-            "vis": vis["permanent_water"],
-            "name": "Permanent Water > 80%",
-        },
-        {
-            "key": "worldcover",
-            "image": auxiliary["worldcover_remap"].clip(aoi),
-            "vis": vis["worldcover"],
-            "name": "ESA WorldCover",
-        },
-        {
-            "key": "dem",
-            "image": auxiliary["dem"].clip(aoi),
-            "vis": vis["dem"],
-            "name": "Copernicus DEM",
-        },
-        {
-            "key": "slope",
-            "image": auxiliary["slope"].clip(aoi),
-            "vis": vis["slope"],
-            "name": "Slope",
-        },
-    ]
+def median_composite(collection, band=None, aoi=None):
+    """
+    Build a median composite from an Earth Engine ImageCollection.
 
-    for spec in layer_specs:
-        m.addLayer(
-            spec["image"],
-            spec["vis"],
-            spec["name"],
-            spec["key"] == default_layer
-        )
+    Parameters:
+        collection: ee.ImageCollection
+        band: optional band name or list of bands
+        aoi: optional clipping geometry
+    """
+    if band is not None:
+        collection = collection.select(band)
 
-    m.addLayer(
-        rivers_image.clip(aoi),
-        vis["rivers"],
-        "HydroSHEDS rivers",
-        False
+    image = collection.median()
+
+    if aoi is not None:
+        image = image.clip(aoi)
+
+    return image
+
+def mask_area_km2(mask, region, scale=10):
+    """Compute the area of a binary mask in km²."""
+    area = (
+        mask.unmask(0)
+        .gt(0)
+        .multiply(ee.Image.pixelArea())
+        .divide(1e6)
+        .rename("area_km2")
     )
 
-    for name, style in aoi_styles.items():
-        m.addLayer(style, {}, name)
+    value = area.reduceRegion(
+        reducer=ee.Reducer.sum(),
+        geometry=region,
+        scale=scale,
+        maxPixels=1e13,
+        bestEffort=True,
+        tileScale=4,
+    ).get("area_km2").getInfo()
 
-    m.addLayer(places_style, {}, "Places")
-    m.addLayerControl()
-
-    return m
-
-def load_core_datasets(
-    us,
-    events,
-    dates,
-    aoi_emilia_romagna,
-    analysis_aoi,
-    include_seasonal_reference=True,
-):
-    """
-    Load Sentinel-1, Sentinel-2 and auxiliary datasets for all flood events.
-
-    Returns:
-        dict containing:
-        - s1
-        - s1_orbits
-        - s2
-        - auxiliary
-        - water_occurrence
-        - permanent_water
-        - rivers_image
-        - vis
-        - s1_seasonal_ref
-        - s2_seasonal_ref_romagna
-    """
-
-    s1 = {}
-    s1_orbits = {}
-    s2 = {}
-
-    for event_key, event in events.items():
-        aoi = event["aoi"]
-
-        s1[event_key] = {
-            "pre": us.load_sentinel1(aoi, *dates[event["pre"]]),
-            "post": us.load_sentinel1(aoi, *dates[event["post"]]),
-            "recovery": us.load_sentinel1(aoi, *dates[event["recovery"]]),
-        }
-
-        s1_orbits[event_key] = {
-            "pre_ASC": us.load_sentinel1(
-                aoi,
-                *dates[event["pre"]],
-                orbit_pass="ASCENDING",
-            ),
-            "post_ASC": us.load_sentinel1(
-                aoi,
-                *dates[event["post"]],
-                orbit_pass="ASCENDING",
-            ),
-            "pre_DESC": us.load_sentinel1(
-                aoi,
-                *dates[event["pre"]],
-                orbit_pass="DESCENDING",
-            ),
-            "post_DESC": us.load_sentinel1(
-                aoi,
-                *dates[event["post"]],
-                orbit_pass="DESCENDING",
-            ),
-        }
-
-        s2[event_key] = {
-            "pre": us.load_sentinel2_raw(
-                aoi,
-                *dates[event["pre"]],
-                max_cloud=95,
-            ),
-            "post": us.load_sentinel2_raw(
-                aoi,
-                *dates[event["post"]],
-                max_cloud=100,
-            ),
-            "recovery": us.load_sentinel2_raw(
-                aoi,
-                *dates[event["recovery"]],
-                max_cloud=95,
-            ),
-        }
-
-    s1_seasonal_ref = None
-    s2_seasonal_ref_romagna = None
-
-    if include_seasonal_reference:
-        s1_seasonal_ref = {
-            "ALL": us.load_sentinel1(
-                analysis_aoi,
-                *dates["seasonal_ref"],
-            ),
-            "ASC": us.load_sentinel1(
-                analysis_aoi,
-                *dates["seasonal_ref"],
-                orbit_pass="ASCENDING",
-            ),
-            "DESC": us.load_sentinel1(
-                analysis_aoi,
-                *dates["seasonal_ref"],
-                orbit_pass="DESCENDING",
-            ),
-        }
-
-        s2_seasonal_ref_romagna = us.load_sentinel2_raw(
-            analysis_aoi,
-            *dates["seasonal_ref"],
-            max_cloud=95,
-        )
-
-    auxiliary = us.load_auxiliary_datasets(aoi_emilia_romagna)
-
-    data = {
-        "s1": s1,
-        "s1_orbits": s1_orbits,
-        "s2": s2,
-        "auxiliary": auxiliary,
-        "water_occurrence": auxiliary["water_occurrence"],
-        "permanent_water": auxiliary["permanent_water"],
-        "rivers_image": auxiliary["rivers_image"],
-        "vis": us.get_vis_params(),
-        "s1_seasonal_ref": s1_seasonal_ref,
-        "s2_seasonal_ref_romagna": s2_seasonal_ref_romagna,
-    }
-
-    return data
+    return 0.0 if value is None else float(value)
 
 
-def build_preview_layers_and_availability(
-    us,
-    events,
-    s1,
-    s1_orbits,
-    s2,
-    include_seasonal_reference=True,
-    s1_seasonal_ref=None,
-    s2_seasonal_ref_romagna=None,
-    analysis_aoi=None,
-    output_path="outputs/tables/00_dataset_availability.csv",
-):
-    """
-    Build Sentinel-1/Sentinel-2 preview composites and dataset availability table.
-
-    Returns:
-        dict containing:
-        - s1_vv
-        - s2_rgb
-        - seasonal_layers
-        - df_availability
-    """
-
-    # Sentinel-1 VV median composites
-    s1_vv = {
-        event_key: {
-            "pre": s1[event_key]["pre"]
-            .select("VV")
-            .median()
-            .clip(events[event_key]["aoi"]),
-            "post": s1[event_key]["post"]
-            .select("VV")
-            .median()
-            .clip(events[event_key]["aoi"]),
-        }
-        for event_key in events
-    }
-
-    # Sentinel-2 RGB median composites
-    s2_rgb = {
-        event_key: {
-            "pre": s2[event_key]["pre"]
-            .median()
-            .clip(events[event_key]["aoi"]),
-            "post": s2[event_key]["post"]
-            .median()
-            .clip(events[event_key]["aoi"]),
-        }
-        for event_key in events
-    }
-
-    seasonal_layers = None
-
-    if include_seasonal_reference:
-        if s1_seasonal_ref is None or s2_seasonal_ref_romagna is None:
-            raise ValueError(
-                "Seasonal reference is enabled, but seasonal collections were not provided."
-            )
-
-        if analysis_aoi is None:
-            raise ValueError(
-                "aoi_romagna must be provided when seasonal reference is enabled."
-            )
-
-        s1_seasonal_ref_vv = (
-            s1_seasonal_ref["ALL"]
-            .select("VV")
-            .median()
-            .clip(analysis_aoi)
-        )
-
-        s2_seasonal_ref_rgb = (
-            s2_seasonal_ref_romagna
-            .median()
-            .clip(analysis_aoi)
-        )
-
-        s1_pre_minus_seasonal = (
-            s1_vv["sept"]["pre"]
-            .subtract(s1_seasonal_ref_vv)
-            .rename("S1_2024_pre_minus_2023_seasonal")
-        )
-
-        seasonal_layers = {
-            "s1_vv": s1_seasonal_ref_vv,
-            "s1_difference": s1_pre_minus_seasonal,
-            "s2_rgb": s2_seasonal_ref_rgb,
-        }
-
-    collections = {}
-
-    for event_key, event in events.items():
-        label = event["name"]
-
-        collections.update({
-            f"S1 {label} pre-event ALL": s1[event_key]["pre"],
-            f"S1 {label} post-event ALL": s1[event_key]["post"],
-            f"S1 {label} recovery ALL": s1[event_key]["recovery"],
-            f"S1 {label} pre-event ASC": s1_orbits[event_key]["pre_ASC"],
-            f"S1 {label} post-event ASC": s1_orbits[event_key]["post_ASC"],
-            f"S1 {label} pre-event DESC": s1_orbits[event_key]["pre_DESC"],
-            f"S1 {label} post-event DESC": s1_orbits[event_key]["post_DESC"],
-            f"S2 {label} pre-event raw": s2[event_key]["pre"],
-            f"S2 {label} post-event raw": s2[event_key]["post"],
-            f"S2 {label} recovery raw": s2[event_key]["recovery"],
-        })
-
-    if include_seasonal_reference:
-        collections.update({
-            "S1 Romagna seasonal reference ALL": s1_seasonal_ref["ALL"],
-            "S1 Romagna seasonal reference ASC": s1_seasonal_ref["ASC"],
-            "S1 Romagna seasonal reference DESC": s1_seasonal_ref["DESC"],
-            "S2 Romagna seasonal reference raw": s2_seasonal_ref_romagna,
-        })
-
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-
-    df_availability = us.collection_sizes(
-        collections,
-        output_path=output_path,
-    )
-
-    return {
-        "s1_vv": s1_vv,
-        "s2_rgb": s2_rgb,
-        "seasonal_layers": seasonal_layers,
-        "df_availability": df_availability,
-    }
 
 
-def export_single_ee_image_png(
-    image,
-    region,
-    vis_params,
-    output_path,
-    title=None,
-    dimensions=900,
-):
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    url = image.clip(region).getThumbURL({
-        **vis_params,
-        "region": region,
-        "dimensions": dimensions,
-        "format": "png",
-    })
-
-    response = requests.get(url)
-    response.raise_for_status()
-
-    tmp_path = output_path.with_suffix(".tmp.png")
-    tmp_path.write_bytes(response.content)
-
-    img = Image.open(tmp_path).convert("RGB")
-
-    if title is not None:
-        title_h = 44
-        canvas = Image.new("RGB", (img.width, img.height + title_h), "white")
-        canvas.paste(img, (0, title_h))
-
-        draw = ImageDraw.Draw(canvas)
-        draw.text((12, 12), title, fill="black")
-
-        canvas.save(output_path)
-    else:
-        img.save(output_path)
-
-    tmp_path.unlink(missing_ok=True)
-
-    return IPyImage(filename=str(output_path))
-
+# =============================================================================
+# PNG export helpers
+# =============================================================================
 
 def export_side_by_side_ee_images(
     left_image,
@@ -673,38 +509,35 @@ def export_side_by_side_ee_images(
     right_title="Post-event",
     dimensions=900,
 ):
+    """Export two Earth Engine image previews as a single side-by-side PNG."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def download_thumb(image, suffix):
-        url = image.clip(region).getThumbURL({
-            **vis_params,
-            "region": region,
-            "dimensions": dimensions,
-            "format": "png",
-        })
-        response = requests.get(url)
-        response.raise_for_status()
-        tmp_path = output_path.with_name(output_path.stem + f"_{suffix}.png")
-        tmp_path.write_bytes(response.content)
-        return tmp_path
+    left = download_ee_thumbnail(
+        image=left_image,
+        region=region,
+        vis_params=vis_params,
+        dimensions=dimensions,
+    )
 
-    left_path = download_thumb(left_image, "left_tmp")
-    right_path = download_thumb(right_image, "right_tmp")
+    right = download_ee_thumbnail(
+        image=right_image,
+        region=region,
+        vis_params=vis_params,
+        dimensions=dimensions,
+    )
 
-    left = Image.open(left_path).convert("RGB")
-    right = Image.open(right_path).convert("RGB")
+    left, right = match_heights(left, right)
 
-    target_h = min(left.height, right.height)
-    left = left.resize((int(left.width * target_h / left.height), target_h))
-    right = right.resize((int(right.width * target_h / right.height), target_h))
-
-    title_h = 48
     gap = 20
-    width = left.width + right.width + gap
-    height = target_h + title_h
+    title_h = 48
 
-    canvas = Image.new("RGB", (width, height), "white")
+    canvas = Image.new(
+        "RGB",
+        (left.width + right.width + gap, left.height + title_h),
+        "white",
+    )
+
     canvas.paste(left, (0, title_h))
     canvas.paste(right, (left.width + gap, title_h))
 
@@ -713,7 +546,65 @@ def export_side_by_side_ee_images(
     draw.text((left.width + gap + 12, 14), right_title, fill="black")
 
     canvas.save(output_path)
-    left_path.unlink(missing_ok=True)
-    right_path.unlink(missing_ok=True)
+
+    return IPyImage(filename=str(output_path))
+
+
+def download_ee_thumbnail(image, region, vis_params, dimensions=900):
+    """Download an Earth Engine thumbnail and return it as a PIL RGB image."""
+    url = image.clip(region).getThumbURL({
+        **vis_params,
+        "region": region,
+        "dimensions": dimensions,
+        "format": "png",
+    })
+
+    response = requests.get(url)
+    response.raise_for_status()
+
+    return Image.open(BytesIO(response.content)).convert("RGB")
+
+def match_heights(left, right):
+    """Resize two PIL images to the same height while keeping aspect ratio."""
+    target_h = min(left.height, right.height)
+
+    left = left.resize(
+        (int(left.width * target_h / left.height), target_h)
+    )
+
+    right = right.resize(
+        (int(right.width * target_h / right.height), target_h)
+    )
+
+    return left, right
+
+
+def export_single_ee_image_png(
+    image,
+    region,
+    vis_params,
+    output_path,
+    title=None,
+    dimensions=900,
+):
+    """Export one Earth Engine image preview as PNG and display it in the notebook."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    img = download_ee_thumbnail(
+        image=image,
+        region=region,
+        vis_params=vis_params,
+        dimensions=dimensions,
+    )
+
+    if title is not None:
+        canvas = Image.new("RGB", (img.width, img.height + 44), "white")
+        canvas.paste(img, (0, 44))
+        draw = ImageDraw.Draw(canvas)
+        draw.text((12, 12), title, fill="black")
+        img = canvas
+
+    img.save(output_path)
 
     return IPyImage(filename=str(output_path))

@@ -4,8 +4,8 @@ import ee
 def get_project_config():
     aoi_emilia_romagna = ee.Geometry.Rectangle([10.7, 43.7, 12.8, 45.1])
     aoi_romagna = ee.Geometry.Rectangle([11.3, 44.0, 12.5, 44.8])
-    aoi_bologna = ee.Geometry.Rectangle([11.15, 44.15, 11.65, 44.65])
-    aoi_sept_lugo_bagnacavallo = ee.Geometry.Rectangle([11.80, 44.34, 12.08, 44.50])
+    aoi_bologna = ee.Geometry.Rectangle([11.35, 44.35, 11.85, 44.85])
+    aoi_sept_lugo_bagnacavallo = ee.Geometry.Rectangle([11.72, 44.30, 12.10, 44.68])
     aoi_sept_faenza = ee.Geometry.Rectangle([11.72, 44.20, 11.98, 44.38])
     aoi_sept_forli = ee.Geometry.Rectangle([11.92, 44.12, 12.18, 44.30])
 
@@ -27,7 +27,7 @@ def get_project_config():
 
     dates = {
     "sept_pre": ("2024-08-20", "2024-09-15"),
-    "sept_post": ("2024-09-18", "2024-09-26"),
+    "sept_post": ("2024-09-18", "2024-09-27"),
     "sept_recovery": ("2024-09-27", "2024-10-15"),
 
     "oct_pre": ("2024-10-01", "2024-10-18"),
@@ -51,10 +51,10 @@ def get_project_config():
             "pre": "sept_pre",
             "post": "sept_post",
             "recovery": "sept_recovery",
-            "center": [44.42, 11.95],
-            "zoom": 11,
+            "center": [44.49, 11.91],
+            "zoom": 10,
             "aoi_color": "red",
-            "aoi_label": "AOI Lugo-Bagnacavallo-Traversara",
+            "aoi_label": "AOI September Lugo-Bagnacavallo-Traversara",
         },
         # "sept": {
         #     "name": "September Faenza",
@@ -107,45 +107,53 @@ def get_project_config():
 
 SAR_PARAMS = {
     "sept": {
-        "delta_threshold": -2.5,
-        "ratio_threshold": 0.7,
+        "delta_threshold": -3.2,
+        "ratio_threshold": 0.50,
         "vv_post_threshold": -17,
+        "vh_delta_threshold": -3.0,
+        "vh_ratio_threshold": 0.55,
         "slope_threshold": 5,
-        "min_connected_pixels": 10,
+        "min_connected_pixels": 60,
+        "confidence_threshold": 3,
+        "speckle_radius": 30,
+        "use_otsu_in_confidence": True,
         "orbit_pass_override": "DESCENDING",
         "relative_orbit_override": 95,
-        "use_otsu_in_confidence": False,
     },
     "oct": {
-        "delta_threshold": -2.5,
-        "ratio_threshold": 0.7,
+        "delta_threshold": -3.0,
+        "ratio_threshold": 0.50,
         "vv_post_threshold": -17,
+        "vh_delta_threshold": -3.0,
+        "vh_ratio_threshold": 0.55,
         "slope_threshold": 5,
-        "min_connected_pixels": 10,
+        "min_connected_pixels": 20,
+        "confidence_threshold": 3,
+        "speckle_radius": 30,
+        "use_otsu_in_confidence": True,
         "orbit_pass_override": "ASCENDING",
         "relative_orbit_override": 117,  # 168 Descending
-        "use_otsu_in_confidence": False,
     },
 }
 
 OPTICAL_PARAMS = {
     "sept": {
         "max_cloud_pre": 95,
-        "max_cloud_post": 100,
+        "max_cloud_post": 60,
         "optical_index": "MNDWI",
         "optical_threshold": 0.0,
         "pre_window_override": "sept_pre_optical",
         "post_window_override": "sept_post_optical",
-        "composite_method": "median",
+        "composite_method": "mosaic",
     },
     "oct": {
-        "max_cloud_pre": 95,
-        "max_cloud_post": 100,
+        "max_cloud_pre": 50,
+        "max_cloud_post": 60,
         "optical_index": "MNDWI",
-        "optical_threshold": 0.0,
+        "optical_threshold": 0.10,
         "pre_window_override": "oct_pre_optical",
         "post_window_override": "oct_post_optical",
-        "composite_method": "median",
+        "composite_method": "mosaic",
     },
 }
 
@@ -164,4 +172,33 @@ RISK_PARAMS = {
         "historical_water_threshold": 10,
         "roi_buffer_m": 3000,
     },
+}
+WORLDCOVER_CLASSES = {
+    10: "Tree cover",
+    20: "Shrubland",
+    30: "Grassland",
+    40: "Cropland",
+    50: "Built-up",
+    60: "Bare / sparse vegetation",
+    70: "Snow and ice",
+    80: "Permanent water bodies",
+    90: "Herbaceous wetland",
+    95: "Mangroves",
+    100: "Moss and lichen",
+}
+
+EXPOSED_WORLDCOVER_CLASSES = [40, 50]
+
+VULNERABILITY_CLASSES = {
+    0: "No / very low vulnerability",
+    1: "Low vulnerability",
+    2: "Medium vulnerability",
+    3: "High vulnerability",
+}
+
+RISK_CLASSES = {
+    0: "No / very low risk",
+    1: "Low risk",
+    2: "Medium risk",
+    3: "High risk",
 }
