@@ -39,22 +39,22 @@ Changing MONTH automatically changes the event area, dates, SAR parameters, opti
 
 ## Project Structure
 
-The project is organized into a main notebook and a set of utility files.
+The project is organized into a main notebook and a set of utility files:
 
-floods-SAR/
-│
-├── flood_analysis.ipynb
-│
-├── utils/
-│   ├── config.py
-│   ├── utils_setup.py
-│   ├── utils_SAR.py
-│   ├── utils_optical.py
-│   └── utils_final.py
-│
-└── outputs/
-    ├── figures/
-    └── tables/
+    floods-SAR/
+    │
+    ├── flood_analysis.ipynb
+    │
+    ├── utils/
+    │   ├── config.py
+    │   ├── utils_setup.py
+    │   ├── utils_SAR.py
+    │   ├── utils_optical.py
+    │   └── utils_final.py
+    │
+    └── outputs/
+        ├── figures/
+        └── tables/
 
 - `flood_analysis.ipynb`: main notebook that runs the complete workflow.
 - `utils/config.py`: contains event configuration, dates, AOIs and processing parameters.
