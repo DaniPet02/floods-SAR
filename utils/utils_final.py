@@ -54,19 +54,6 @@ def make_vulnerability_layers(
     historical_water_threshold=10,
 ):
     """Create simple vulnerability factors and a 0-3 vulnerability class."""
-    elevation_threshold = ee.Number(
-        dem.reduceRegion(
-            reducer=ee.Reducer.percentile([elevation_percentile]),
-            geometry=region,
-            scale=30,
-            maxPixels=1e13,
-            bestEffort=True,
-            tileScale=4,
-        ).get("DEM")
-    )
-
-    low_elevation = dem.lte(elevation_threshold).rename("low_elevation")
-    low_slope = slope.lt(slope_threshold).rename("low_slope")
 
     rivers_raster = (
         ee.Image()
@@ -82,12 +69,24 @@ def make_vulnerability_layers(
 
     near_river = distance_to_river.lt(river_distance_threshold).rename("near_river")
 
-    exposed_landcover = ee.Image(0)
+    elevation_threshold = ee.Number(
+        dem.updateMask(near_river).reduceRegion(
+            reducer=ee.Reducer.percentile([elevation_percentile]),
+            geometry=region,
+            scale=30,
+            maxPixels=1e13,
+            bestEffort=True,
+            tileScale=4,
+        ).get("DEM")
+    )
 
-    for class_value in cfg.EXPOSED_WORLDCOVER_CLASSES:
-        exposed_landcover = exposed_landcover.Or(worldcover.eq(class_value))
+    low_elevation = (
+        dem.lte(elevation_threshold)
+        .And(near_river)
+        .rename("low_elevation")
+    )
 
-    exposed_landcover = exposed_landcover.rename("exposed_landcover")
+    low_slope = slope.lt(slope_threshold).rename("low_slope")
 
     historical_water = (
         water_occurrence
@@ -96,11 +95,24 @@ def make_vulnerability_layers(
         .rename("historical_water")
     )
 
+    cropland = worldcover.eq(40)
+    builtup = worldcover.eq(50)
+
+    exposed_landcover = (
+        cropland.Or(builtup)
+        .rename("exposed_landcover")
+    )
+
+    landcover_exposure_score = (
+        cropland.multiply(1)
+        .add(builtup.multiply(2))
+    )
+
     vulnerability_score = (
         low_elevation.unmask(0)
         .add(low_slope.unmask(0))
         .add(near_river.unmask(0))
-        .add(exposed_landcover.unmask(0))
+        .add(landcover_exposure_score.unmask(0))
         .add(historical_water.unmask(0))
         .rename("vulnerability_score")
         .toByte()

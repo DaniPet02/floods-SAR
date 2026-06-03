@@ -128,6 +128,7 @@ def optical_processing_df(event_key, s2, optical, optical_params):
         ("Optical threshold", optical_params.get("optical_threshold", 0.0)),
         ("Pre valid pixels", f"{valid_pixel_percentage(optical['pre_comp'], aoi):.1f}%"),
         ("Post valid pixels", f"{valid_pixel_percentage(optical['post_comp'], aoi):.1f}%"),
+        ("Optical delta threshold", optical_params.get("optical_delta_threshold", 0.10)),
     ]
 
     return pd.DataFrame(rows, columns=["parameter", "value"])
@@ -174,29 +175,37 @@ def make_optical_masks(
     permanent_water,
     optical_index="MNDWI",
     optical_threshold=0.0,
+    optical_delta_threshold=0.10,
 ):
-    """Create valid-pixel, optical-water and new-water masks."""
     optical_index = optical_index.upper()
-    post_comp = optical["post_comp"]
+
+    pre_index = optical["pre_comp"].select(optical_index)
+    post_index = optical["post_comp"].select(optical_index)
+
+    pre_valid = optical["pre_comp"].select("B3").mask().gt(0)
+    post_valid = optical["post_comp"].select("B3").mask().gt(0)
 
     optical_valid = (
-        post_comp
-        .select("B3")
-        .mask()
+        pre_valid.And(post_valid)
         .rename(f"{event_key}_optical_valid")
         .toByte()
     )
 
+    pre_water = pre_index.gt(optical_threshold)
+    post_water = post_index.gt(optical_threshold)
+    delta_water = post_index.subtract(pre_index).gt(optical_delta_threshold)
+
     optical_water = (
-        post_comp
-        .select(optical_index)
-        .gt(optical_threshold)
+        post_water.And(optical_valid)
         .rename(f"{event_key}_optical_water")
         .toByte()
     )
 
     optical_new_water = (
-        optical_water
+        post_water
+        .And(pre_water.Not())
+        .And(delta_water)
+        .And(optical_valid)
         .And(permanent_water.unmask(0).Not())
         .rename(f"{event_key}_optical_new_water")
         .toByte()
@@ -219,7 +228,7 @@ def make_fusion_map(
     sar_flood = sar_confidence.gte(sar_confidence_threshold)
     sar_low = sar_confidence.gt(0).And(sar_confidence.lt(sar_confidence_threshold))
 
-    optical_water = optical_masks["optical_water"].unmask(0).gt(0)
+    optical_water = optical_masks["optical_new_water"].unmask(0).gt(0)
     optical_valid = optical_masks["optical_valid"].unmask(0).gt(0)
     permanent_water = permanent_water.unmask(0).gt(0)
 
@@ -437,6 +446,7 @@ def run_optical_event(
     optical_threshold=0.0,
     composite_method="median",
     sar_confidence_threshold=3,
+    optical_delta_threshold=0.10,
     max_cloud_pre=None,
     max_cloud_post=None,
     pre_window_override=None,
@@ -464,6 +474,7 @@ def run_optical_event(
         permanent_water=permanent_water,
         optical_index=optical_index,
         optical_threshold=optical_threshold,
+        optical_delta_threshold=optical_delta_threshold,
     )
 
     fusion_map = make_fusion_map(
@@ -478,6 +489,7 @@ def run_optical_event(
         "optical_index": optical_index,
         "optical_threshold": optical_threshold,
         "composite_method": composite_method,
+        "optical_delta_threshold": optical_delta_threshold,
     }
 
     df_processing = optical_processing_df(
