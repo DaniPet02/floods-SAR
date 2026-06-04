@@ -69,10 +69,11 @@ def load_event_datasets(aoi, dates, event, sar_params=None, optical_params=None)
         start_date, end_date = dates[event[window]]
 
         s1_base = (
-            ee.ImageCollection("COPERNICUS/S1_GRD")
+            ee.ImageCollection("COPERNICUS/S1_GRD") # Sentinel-1 Ground Range Detected (GRD) product, which is the most commonly used for flood mapping due to its balance of resolution and coverage. 
+            # It provides dual-polarization data (VV and VH) at 10m resolution, which are essential for our flood detection algorithm.
             .filterBounds(aoi)
             .filterDate(start_date, end_date)
-            .filter(ee.Filter.eq("instrumentMode", "IW"))
+            .filter(ee.Filter.eq("instrumentMode", "IW")) # Interferometric Wide swath mode, which is the default mode
             .filter(ee.Filter.eq("resolution_meters", 10))
             .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
             .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
@@ -120,7 +121,8 @@ def load_event_datasets(aoi, dates, event, sar_params=None, optical_params=None)
         }[window]
 
         s2[window] = (
-            ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+            ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED") # Sentinel-2 Level-2A Surface Reflectance product, 
+            # which provides atmospherically corrected reflectance values at 10m resolution, essential for accurate water detection using spectral indices.
             .filterBounds(aoi)
             .filterDate(optical_start, optical_end)
             .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", max_cloud))
@@ -162,11 +164,21 @@ def load_auxiliary_datasets(aoi):
     - slope
     - HydroSHEDS rivers
     """
-    jrc_water = ee.Image("JRC/GSW1_4/GlobalSurfaceWater")
+    jrc_water = ee.Image("JRC/GSW1_4/GlobalSurfaceWater") # JRC Global Surface Water dataset, which provides historical water occurrence and change information at 30m resolution, 
+    # crucial for identifying areas that are frequently flooded or have permanent water presence, thus improving the accuracy of our flood risk assessment.
     water_occurrence = jrc_water.select("occurrence").unmask(0)
     permanent_water = water_occurrence.gt(80).rename("permanent_water")
 
-    worldcover = ee.ImageCollection("ESA/WorldCover/v200").first().select("Map")
+    worldcover = ee.ImageCollection("ESA/WorldCover/v200").first().select("Map") # ESA WorldCover dataset, which provides global land cover classification at 10m resolution for the year 2020,
+
+    ghsl_population = (
+        ee.ImageCollection("JRC/GHSL/P2023A/GHS_POP")
+        .sort("system:time_start", False)
+        .first()
+        .select("population_count")
+        .clip(aoi)
+        .rename("population_count")
+    )
 
     worldcover_classes = [10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100]
     worldcover_remap = worldcover.remap(
@@ -174,7 +186,8 @@ def load_auxiliary_datasets(aoi):
         list(range(len(worldcover_classes))),
     ).rename("WorldCover_remap")
 
-    dem_collection = ee.ImageCollection("COPERNICUS/DEM/GLO30").select("DEM")
+    dem_collection = ee.ImageCollection("COPERNICUS/DEM/GLO30").select("DEM") # Copernicus DEM GLO-30, which provides global digital elevation data at 30m resolution, 
+    # essential for identifying low-lying areas and understanding flood dynamics in our risk assessment.
     dem = dem_collection.mosaic().setDefaultProjection(
         dem_collection.first().projection()
     )
@@ -182,7 +195,7 @@ def load_auxiliary_datasets(aoi):
     slope = ee.Terrain.slope(dem).rename("slope")
 
     rivers = (
-        ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers")
+        ee.FeatureCollection("WWF/HydroSHEDS/v1/FreeFlowingRivers") # HydroSHEDS Free-Flowing Rivers dataset, which provides global river network data at high resolution,
         .filterBounds(aoi)
     )
 
@@ -202,6 +215,7 @@ def load_auxiliary_datasets(aoi):
         "slope": slope,
         "rivers": rivers,
         "rivers_image": rivers_image,
+        "population": ghsl_population,
     }
 
 
@@ -209,6 +223,7 @@ def load_auxiliary_datasets(aoi):
 # Tables and quick summaries
 # =============================================================================
 
+# dataset availability
 def collection_sizes(collections, output_path=None):
     """
     Return a table with the number of images in each Earth Engine collection.
@@ -243,7 +258,7 @@ def get_vis_params():
     return {
         # Sentinel-1 SAR
         "s1_vv": {
-            "min": -25,
+            "min": -25, # backscatter
             "max": 0,
         },
         "s1_change": {
@@ -252,21 +267,19 @@ def get_vis_params():
             "palette": ["blue", "white", "red"],
         },
 
-        # Sentinel-2 raw DN-style preview, kept for setup/context cells.
         "s2_true_color": {
-            "bands": ["B4", "B3", "B2"],
+            "bands": ["B4", "B3", "B2"], # Red, Green, Blue for natural color visualization
             "min": 0,
             "max": 3000,
         },
 
-        # Sentinel-2 scaled reflectance products used by utils_optical.
         "true_color": {
             "bands": ["B4", "B3", "B2"],
             "min": 0.0,
             "max": 0.30,
         },
         "false_color": {
-            "bands": ["B8", "B4", "B3"],
+            "bands": ["B8", "B4", "B3"], # NIR, Red, Green for vegetation and water detection
             "min": 0.0,
             "max": 0.45,
         },
@@ -353,7 +366,11 @@ def get_vis_params():
             "max": 1,
             "palette": ["ffffff", "ff0000"],
         },
-
+        "population": {
+            "min": 0,
+            "max": 1000,
+            "palette": ["white", "yellow", "orange", "red"],
+        },
         "water_occurrence": {
             "min": 0,
             "max": 100,
@@ -419,7 +436,7 @@ def styled_places(places, aoi, color="000000", point_size=4, point_shape="circle
         pointShape=point_shape,
     )
 
-def make_context_map(event, aoi, places):
+def make_context_map(event, aoi, places): # simple map showing AOI and places
     """
     Create a simple context map showing only the study area and relevant places.
     This map is only used for orientation at the beginning of the notebook.
@@ -452,7 +469,7 @@ def make_context_map(event, aoi, places):
 # Composite helpers
 # =============================================================================
 
-def median_composite(collection, band=None, aoi=None):
+def median_composite(collection, band=None, aoi=None): # build a median composite from an Earth Engine ImageCollection
     """
     Build a median composite from an Earth Engine ImageCollection.
 
@@ -471,7 +488,7 @@ def median_composite(collection, band=None, aoi=None):
 
     return image
 
-def mask_area_km2(mask, region, scale=10):
+def mask_area_km2(mask, region, scale=10): # compute area in km² for quantifying flood extent
     """Compute the area of a binary mask in km²."""
     area = (
         mask.unmask(0)
@@ -497,7 +514,7 @@ def mask_area_km2(mask, region, scale=10):
 # PNG export helpers
 # =============================================================================
 
-def export_side_by_side_ee_images(
+def export_side_by_side_ee_images( # export two Earth Engine image previews as a single side-by-side PNG
     left_image,
     right_image,
     region,
@@ -506,7 +523,7 @@ def export_side_by_side_ee_images(
     left_title="Pre-event",
     right_title="Post-event",
     dimensions=900,
-):
+): 
     """Export two Earth Engine image previews as a single side-by-side PNG."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -547,7 +564,7 @@ def export_side_by_side_ee_images(
 
     return IPyImage(filename=str(output_path))
 
-def download_ee_thumbnail(image, region, vis_params, dimensions=900):
+def download_ee_thumbnail(image, region, vis_params, dimensions=900): # download earth engine image for png export
     """Download an Earth Engine thumbnail and return it as a PIL RGB image."""
     url = image.clip(region).getThumbURL({
         **vis_params,
@@ -561,7 +578,7 @@ def download_ee_thumbnail(image, region, vis_params, dimensions=900):
 
     return Image.open(BytesIO(response.content)).convert("RGB")
 
-def match_heights(left, right):
+def match_heights(left, right): # resize two images to the same height while keeping aspect ratio
     """Resize two PIL images to the same height while keeping aspect ratio."""
     target_h = min(left.height, right.height)
 
@@ -575,7 +592,7 @@ def match_heights(left, right):
 
     return left, right
 
-def export_single_ee_image_png(
+def export_single_ee_image_png( # export one Earth Engine image preview as PNG and display it in the notebook
     image,
     region,
     vis_params,

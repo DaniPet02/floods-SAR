@@ -34,14 +34,13 @@ def get_project_config():
     "oct_post": ("2024-10-20", "2024-10-27"),
     "oct_recovery": ("2024-10-28", "2024-11-15"),
 
-    # Wider optical windows used only for Sentinel-2 compositing
     "sept_pre_optical": ("2024-08-20", "2024-09-15"),
     "sept_post_optical": ("2024-09-18", "2024-10-05"),
 
     "oct_pre_optical": ("2024-09-15", "2024-10-18"),
     "oct_post_optical": ("2024-10-20", "2024-11-10"),
 
-    "seasonal_ref": ("2023-08-20", "2023-09-30"),
+    "seasonal_ref": ("2023-08-20", "2023-09-30"), # used as reference for comparison with previous year
 }
 
     events = {
@@ -107,18 +106,18 @@ def get_project_config():
 
 SAR_PARAMS = {
     "sept": {
-        "delta_threshold": -3.2,
-        "ratio_threshold": 0.50,
-        "vv_post_threshold": -17,
-        "vh_delta_threshold": -3.0,
-        "vh_ratio_threshold": 0.55,
-        "slope_threshold": 5,
-        "min_connected_pixels": 60,
-        "confidence_threshold": 3,
-        "speckle_radius": 30,
-        "use_otsu_in_confidence": True,
-        "orbit_pass_override": "DESCENDING",
-        "relative_orbit_override": 95,
+        "delta_threshold": -3.2, # consider flood if VV drops by more than 3.2 dB compared to pre-event
+        "ratio_threshold": 0.50, # consider flood if backscatter drops by more than 50% compared to pre-event
+        "vv_post_threshold": -17, # additional indicator because in some cases the pre-event backscatter is already very low
+        "vh_delta_threshold": -3.0, # additional indicator to avoid false positives floods, sensitivity to more complex surfaces and can understand if there is water under vegetation
+        "vh_ratio_threshold": 0.55, # consider flood if backscatter drops by more than 55% compared to pre-event in VH polarization
+        "slope_threshold": 5, # exclude zones with slope greater than 5 degrees to avoid false positives in hilly areas, can cause shadowing effects that mimic flood signals
+        "min_connected_pixels": 60, # consider flood only if there are at least 60 connected pixels to avoid speckle noise
+        "speckle_radius": 30, # speckle noise happens when radar signal bounces multiple times before returning to the sensor
+        "confidence_threshold": 3, # final mask must be confirmed by at least 3 of the previous indicators to be considered flood.
+        "use_otsu_in_confidence": True, # use otsu threshold as component of confidence
+        "orbit_pass_override": "DESCENDING", # same orbit pass for pre and post
+        "relative_orbit_override": 95, # same orbit for pre and post
     },
     "oct": {
         "delta_threshold": -3.0,
@@ -138,14 +137,14 @@ SAR_PARAMS = {
 
 OPTICAL_PARAMS = {
     "sept": {
-        "max_cloud_pre": 95,
-        "max_cloud_post": 60,
-        "optical_index": "MNDWI",
-        "optical_threshold": 0.0,
-        "optical_delta_threshold": 0.10,
-        "pre_window_override": "sept_pre_optical",
+        "max_cloud_pre": 95, # maximum cloud cover allowed in pre-event optical images
+        "max_cloud_post": 60, # maximum cloud cover allowed in post-event optical images
+        "optical_index": "MNDWI", # use MNDWI (Modified Normalized Difference Water Index) which is more sensitive to water presence than NDVI, especially in urban areas
+        "optical_threshold": 0.0, # consider flood if MNDWI is greater than 0, which indicates presence of water
+        "optical_delta_threshold": 0.10, # consider flood if MNDWI increases by more than 0.10 compared to pre-event, to capture new water presence
+        "pre_window_override": "sept_pre_optical", 
         "post_window_override": "sept_post_optical",
-        "composite_method": "median",
+        "composite_method": "median", # use median composite to reduce cloud effects, as it is more robust to outliers than mean
     },
     "oct": {
         "max_cloud_pre": 50,
@@ -161,26 +160,28 @@ OPTICAL_PARAMS = {
 
 RISK_PARAMS = {
     "sept": {
-        "elevation_percentile": 25,
-        "slope_threshold": 2,
-        "river_distance_threshold": 1000,
-        "historical_water_threshold": 10,
-        "roi_buffer_m": 3000,
+        "elevation_percentile": 25, # identify low areas if the elevation is in the lowest 25% of the area
+        "slope_threshold": 2, # identify flat areas
+        "river_distance_threshold": 1000, # identify areas within 1 km from rivers, which are more likely to flood
+        "historical_water_threshold": 10, # identify areas that have been water at least 10% of the time in the past
+        "population_threshold": 1,
+        "population_weight": 1,
     },
     "oct": {
         "elevation_percentile": 25,
         "slope_threshold": 2,
         "river_distance_threshold": 1000,
         "historical_water_threshold": 10,
-        "roi_buffer_m": 3000,
+        "population_threshold": 1,
+        "population_weight": 1,
     },
 }
 WORLDCOVER_CLASSES = {
     10: "Tree cover",
     20: "Shrubland",
     30: "Grassland",
-    40: "Cropland",
-    50: "Built-up",
+    40: "Cropland", # agricultural damage
+    50: "Built-up", # urban damage
     60: "Bare / sparse vegetation",
     70: "Snow and ice",
     80: "Permanent water bodies",
@@ -189,18 +190,25 @@ WORLDCOVER_CLASSES = {
     100: "Moss and lichen",
 }
 
-EXPOSED_WORLDCOVER_CLASSES = [40, 50]
+EXPOSED_WORLDCOVER_CLASSES = [40, 50] # for risk assessment, we focus on cropland and built-up areas,
 
-VULNERABILITY_CLASSES = {
-    0: "No / very low vulnerability",
+VULNERABILITY_CLASSES = { # translate class values into labels
+    0: "No / very low vulnerability", 
     1: "Low vulnerability",
     2: "Medium vulnerability",
     3: "High vulnerability",
 }
 
-RISK_CLASSES = {
+RISK_CLASSES = { # translate class values into labels
     0: "No / very low risk",
     1: "Low risk",
     2: "Medium risk",
     3: "High risk",
+}
+
+RISK_CHANGE_CLASSES = {
+    0: "Unchanged",
+    1: "Increased by 1 class",
+    2: "Increased by 2 classes",
+    3: "Increased by 3 classes",
 }
