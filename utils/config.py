@@ -55,28 +55,6 @@ def get_project_config():
             "aoi_color": "red",
             "aoi_label": "AOI September Lugo-Bagnacavallo-Traversara",
         },
-        # "sept": {
-        #     "name": "September Faenza",
-        #     "aoi": aoi_sept_faenza,
-        #     "pre": "sept_pre",
-        #     "post": "sept_post",
-        #     "recovery": "sept_recovery",
-        #     "center": [44.29, 11.88],
-        #     "zoom": 11,
-        #     "aoi_color": "red",
-        #     "aoi_label": "AOI Faenza",
-        # },
-        # "sept": {
-        #     "name": "September Forli",
-        #     "aoi": aoi_sept_forli,
-        #     "pre": "sept_pre",
-        #     "post": "sept_post",
-        #     "recovery": "sept_recovery",
-        #     "center": [44.22, 12.04],
-        #     "zoom": 11,
-        #     "aoi_color": "red",
-        #     "aoi_label": "AOI Forli",
-        # },
         "oct": {
             "name": "October Bologna-Pianoro",
             "aoi": aoi_bologna,
@@ -176,6 +154,7 @@ RISK_PARAMS = {
         "population_weight": 1,
     },
 }
+
 WORLDCOVER_CLASSES = {
     10: "Tree cover",
     20: "Shrubland",
@@ -190,7 +169,7 @@ WORLDCOVER_CLASSES = {
     100: "Moss and lichen",
 }
 
-EXPOSED_WORLDCOVER_CLASSES = [40, 50] # for risk assessment, we focus on cropland and built-up areas,
+EXPOSED_WORLDCOVER_CLASSES = [40, 50] # for risk assessment, we focus on cropland and built-up areas
 
 VULNERABILITY_CLASSES = { # translate class values into labels
     0: "No / very low vulnerability", 

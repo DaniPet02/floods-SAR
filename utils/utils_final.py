@@ -42,7 +42,7 @@ def make_hazard_layer(sar_confidence, confidence_threshold=3, name="hazard"):
         .toByte()
     )
 
-def make_vulnerability_layers( # create vulnearbility layers based on elevation, slope and distance to riverse, historical water occurrence, and exposed land cover (cropland and built-up areas)
+def make_vulnerability_layers( # create vulnearbility layers based on elevation, slope and distance to rivers, historical water occurrence, and exposed land cover (cropland and built-up areas)
     dem,
     slope,
     worldcover,
@@ -156,7 +156,7 @@ def make_vulnerability_layers( # create vulnearbility layers based on elevation,
     }
 
 def make_risk_layers(hazard, vulnerability_class, name="risk"):
-    # combine hazard and vulnerability into a simple risk score and class, where risk score is the product of hazard class (0-3) and vulnerability class (0-3).
+    # Combine hazard and vulnerability into a simple risk score and class, where risk score is the product of hazard class (0-3) and vulnerability class (0-3).
     """Combine flood hazard and vulnerability into risk score and risk class."""
     risk_score = (
         hazard.unmask(0)
@@ -217,7 +217,7 @@ def area_by_class(class_image, class_labels, region, event_key, scale=10): # com
     return pd.DataFrame(rows).sort_values("class").reset_index(drop=True)
 
 def exposure_by_worldcover(hazard, worldcover, region, event_key, scale=10):
-    # compute hazard exposure by WorldCover class, where exposure is defined as the area of medium/high hazard (hazard class 2 or 3) within each WorldCover class. 
+    # Compute hazard exposure by WorldCover class, where exposure is defined as the area of medium/high hazard (hazard class 2 or 3) within each WorldCover class. 
     hazard_mask = hazard.gte(2)
 
     area_image = (
@@ -386,7 +386,7 @@ def export_hazard_vs_risk_png(final_results, region, output_dir, month, dimensio
     )
 
 def population_by_class(class_image, class_labels, population, region, event_key, scale=100):
-    # compute population exposure by class for a given categorical image (e.g. vulnerability class or risk class), where population exposure is defined as the sum of population within each class.
+    # Compute population exposure by class for a given categorical image (e.g. vulnerability class or risk class), where population exposure is defined as the sum of population within each class.
     """Compute exposed population grouped by class image."""
     pop_image = (
         population

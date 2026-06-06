@@ -365,7 +365,6 @@ def run_sar_event(
     already been applied in the setup section when loading Sentinel-1.
     """
     aoi = event["aoi"]
-
     speckle_radius = params.pop("speckle_radius", 30)
 
     sar = make_sar_inputs(
@@ -374,6 +373,7 @@ def run_sar_event(
         aoi=aoi,
         speckle_radius=speckle_radius,
     )
+
     masks = make_flood_masks(
         event_key=event_key,
         sar=sar,
@@ -406,7 +406,6 @@ def run_sar_event(
         "masks": masks,
         "df_area": df_area,
         "map": sar_map,
-
         **sar,
         **masks,
     }

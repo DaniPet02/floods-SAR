@@ -223,7 +223,6 @@ def load_auxiliary_datasets(aoi):
 # Tables and quick summaries
 # =============================================================================
 
-# dataset availability
 def collection_sizes(collections, output_path=None):
     """
     Return a table with the number of images in each Earth Engine collection.
